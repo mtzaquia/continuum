@@ -1,8 +1,9 @@
 # Invalidate snapshots
 
 Invalidation returns a bucket to absent state when its established data is no
-longer valid. Continuum supports an explicit local-inclusive reset and
-application event streams that trigger the same operation automatically.
+longer valid. Continuum separates forgetting this process's memory from
+invalidating a snapshot everywhere it can be restored from: `reset()` performs
+the former, while `InvalidationSignal` always performs the latter.
 
 ## Choose the reset depth
 
@@ -31,8 +32,8 @@ causes the call to throw.
 
 ## Observe application events
 
-Add an `InvalidationSignal` to reset automatically for each element of a
-sendable `AsyncSequence`:
+Add an `InvalidationSignal` when each element of a sendable `AsyncSequence`
+means the snapshot is stale in both memory and writable local storage:
 
 ```swift
 import Foundation
@@ -56,8 +57,13 @@ let posts = Bucket(PostsData.all) {
 }
 ```
 
-The event values are intentionally ignored. Their arrival means the bucket's
-snapshot is no longer valid. Any number of invalidation signals can be declared.
+The event values are intentionally ignored. Their arrival always performs
+`reset(including: .localSources)`, not memory-only `reset()`: memory and
+pagination reset immediately, then each writable `LocalSource` receives `nil`.
+This prevents the next `.cached` load from resurrecting the invalid snapshot.
+`InvalidationSignal` has no reset-depth parameter; consume the event yourself
+and call `reset()` if it should forget memory while retaining local data. Any
+number of invalidation signals can be declared.
 
 An unpartitioned bucket starts each observation when it is created and cancels
 it when released. A sequence that finishes stops observing normally. A sequence
@@ -71,7 +77,8 @@ active, so a later event retries the reset.
 
 A partitioned bucket creates a partition's configuration on the first access
 through the outer subscript. Each such partition owns its own invalidation
-observations and resets only its captured local destinations:
+observations. Its events perform the same local-inclusive reset, but only for
+that partition's captured local destinations:
 
 ```swift
 let accounts = Bucket(

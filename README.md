@@ -299,8 +299,12 @@ Memory and pagination reset immediately, then writable local sources receive
 attempts to restore local persistence, throws, and becomes visible through
 `error`.
 
-Use `InvalidationSignal` to apply the same reset whenever an application event
-arrives:
+Use `InvalidationSignal` when an application event means a snapshot is stale
+everywhere. Every event performs `reset(including: .localSources)`, not
+memory-only `reset()`: it clears memory and sends `nil` to every writable local
+source so a later cached load cannot restore the invalid snapshot. This reset
+depth is fixed; consume the event yourself and call `reset()` when only memory
+should be forgotten.
 
 ```swift
 let posts = Bucket(PostsData.all) {
@@ -336,8 +340,9 @@ partition behavior.
   writable and understand atomic-state, ordering, and failure behavior.
 - [Mutating remote values](docs/remote-mutations.md) — add typed remote store
   and removal capabilities while preserving the atomic snapshot pipeline.
-- [Invalidating snapshots](docs/invalidation.md) — clear memory and writable
-  local sources manually or in response to application events.
+- [Invalidating snapshots](docs/invalidation.md) — choose a memory-only or
+  local-inclusive manual reset, and invalidate memory plus writable local
+  sources in response to application events.
 - [Paginating buckets](docs/pagination.md) — append ordered snapshots or
   accumulate one nested collection while refreshing its siblings.
 - [Partitioning buckets](docs/partitioning.md) — cache and observe several

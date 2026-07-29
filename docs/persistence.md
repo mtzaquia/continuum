@@ -73,6 +73,10 @@ state and attempts to restore local persistence. An indexed source returning
 `[]` establishes a known empty snapshot; a successful remote result writes it
 through, while `nil` remains absent.
 
+`InvalidationSignal` always uses this local-inclusive reset depth for its
+events. It is appropriate when a cached snapshot is known stale and must not be
+restored by a later `.cached` load; it does not offer a memory-only option.
+
 ## Use several writable destinations
 
 Any number of local sources can declare `persist:`:

@@ -22,11 +22,18 @@
 
 /// An application event stream that invalidates one atomic bucket snapshot.
 ///
-/// Every event requests a local-inclusive reset. Observable memory resets
-/// immediately; a persistence failure restores the previous snapshot and
-/// becomes the bucket's error. The bucket owns the observation task for its
-/// lifetime. A partitioned bucket starts one observation when each accessed
-/// partition is created.
+/// Every event performs ``BucketPartition/reset(including:)`` with
+/// ``ResetScope/localSources``—not the memory-only ``BucketPartition/reset()``.
+/// It immediately clears observable memory and pagination, then sends `nil` to
+/// every writable ``LocalSource``. This prevents a later cached load from
+/// restoring a snapshot that the event declared stale. The reset depth is
+/// fixed; consume an event yourself and call ``BucketPartition/reset()`` when
+/// only memory should be forgotten.
+///
+/// A persistence failure restores the previous snapshot and becomes the
+/// bucket's error. The bucket owns the observation task for its lifetime. A
+/// partitioned bucket starts one observation when each accessed partition is
+/// created.
 ///
 /// ```swift
 /// InvalidationSignal {
@@ -42,10 +49,11 @@ public struct InvalidationSignal: Sendable {
             @escaping @MainActor @Sendable (any Error) async -> Void
         ) async -> Void
 
-    /// Creates an invalidation signal from an asynchronous sequence.
+    /// Creates a local-inclusive invalidation signal from an asynchronous sequence.
     ///
     /// - Parameter events: A sendable operation creating a sendable event
-    ///   sequence when the bucket starts observing it. A sequence failure
+    ///   sequence when the bucket starts observing it. Each event clears
+    ///   observable memory and writable local snapshots. A sequence failure
     ///   becomes the bucket's observable error and ends this observation.
     public init<
         Events: AsyncSequence & Sendable & SendableMetatype
