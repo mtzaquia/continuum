@@ -38,6 +38,11 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         case present(Space.Snapshot)
     }
 
+    private enum StreamPublication {
+        case result
+        case reset
+    }
+
     private enum LoadOrigin {
         case local
         case remote
@@ -508,8 +513,6 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
                     queued: false
                 )
             )
-            logSupersededWork(replacement: BucketMutationKind.resetLocal.rawValue)
-            supersedeSourceWork()
             mutationEpoch &+= 1
             for task in mutationTasks.values {
                 task.cancel()
@@ -668,13 +671,17 @@ private extension BucketPartition {
         return .success(snapshot)
     }
 
-    func publishStreamChange() {
-        streamVersion &+= 1
-    }
-
-    func publishStreamReset() {
+    private func publishStreamState(
+        _ publication: StreamPublication = .result,
+        changes: () -> Void
+    ) {
+        changes()
         let version = streamVersion &+ 1
-        resetStreamVersion = version
+
+        if case .reset = publication {
+            resetStreamVersion = version
+        }
+
         streamVersion = version
     }
 
@@ -821,7 +828,10 @@ private extension BucketPartition {
                 publishesReset = true
             }
 
-            publishMutation(updated, resetsStream: publishesReset)
+            publishMutation(
+                updated,
+                publication: publishesReset ? .reset : .result
+            )
             if resetsPagination {
                 clearPagination()
             }
@@ -891,34 +901,22 @@ private extension BucketPartition {
                         : nil
                 )
             }
-            if mutationEpoch == epoch,
-               generation == mutationGeneration,
-               (error is CancellationError) == false {
-                loadState = LoadState(
-                    isLoaded: loadState.isLoaded,
-                    error: error
-                )
-            }
             throw error
         }
     }
 
     private func publishMutation(
         _ snapshot: Space.Snapshot?,
-        resetsStream: Bool = false
+        publication: StreamPublication = .result
     ) {
-        if let snapshot {
-            storedSnapshot = .present(snapshot)
-            loadState = LoadState(isLoaded: true)
-        } else {
-            storedSnapshot = .absent
-            loadState = LoadState()
-        }
-
-        if resetsStream {
-            publishStreamReset()
-        } else {
-            publishStreamChange()
+        publishStreamState(publication) {
+            if let snapshot {
+                storedSnapshot = .present(snapshot)
+                loadState = LoadState(isLoaded: true)
+            } else {
+                storedSnapshot = .absent
+                loadState = LoadState()
+            }
         }
     }
 
@@ -934,17 +932,22 @@ private extension BucketPartition {
             return
         }
 
-        publishMutation(snapshot)
-        loadState = LoadState(
-            isLoaded: snapshot != nil,
-            error: error
-        )
-        publishStreamChange()
-        if let paginationCheckpoint {
-            self.paginationCheckpoint = paginationCheckpoint
-            paginationState = PaginationState(
-                hasNextPage: paginationCheckpoint.continuation != nil
+        publishStreamState {
+            if let snapshot {
+                storedSnapshot = .present(snapshot)
+            } else {
+                storedSnapshot = .absent
+            }
+            loadState = LoadState(
+                isLoaded: snapshot != nil,
+                error: error
             )
+            if let paginationCheckpoint {
+                self.paginationCheckpoint = paginationCheckpoint
+                paginationState = PaginationState(
+                    hasNextPage: paginationCheckpoint.continuation != nil
+                )
+            }
         }
         try? await persistence.persist(snapshot)
     }
@@ -972,11 +975,12 @@ private extension BucketPartition {
                     error: error
                 )
             )
-            loadState = LoadState(
-                isLoaded: loadState.isLoaded,
-                error: error
-            )
-            publishStreamChange()
+            publishStreamState {
+                loadState = LoadState(
+                    isLoaded: loadState.isLoaded,
+                    error: error
+                )
+            }
         }
     }
 
@@ -1061,32 +1065,14 @@ private extension BucketPartition {
         let logIdentity = logIdentity
         let operationID = currentOperationID
         let task = Task {
-            for (offset, source) in localSources.enumerated() {
-                let index = offset + 1
-                continuumDebug(
-                    .localSourceStarted(
-                        logIdentity,
-                        index: index,
-                        total: localSources.count
-                    )
-                )
-                try Task.checkCancellation()
-                if let snapshot = try await source.operation() {
-                    try Task.checkCancellation()
-                    continuumDebug(
-                        .localSourceHit(
-                            logIdentity,
-                            index: index,
-                            count: keySpace.values(in: snapshot).count
-                        )
-                    )
-                    return LoadOutcome(snapshot: snapshot, origin: .local)
-                }
-                continuumDebug(
-                    .localSourceMissed(
-                        logIdentity,
-                        index: index
-                    )
+            if let snapshot = try await Self.firstLocalSnapshot(
+                from: localSources,
+                keySpace: keySpace,
+                logIdentity: logIdentity
+            ) {
+                return LoadOutcome(
+                    snapshot: snapshot,
+                    origin: .local
                 )
             }
 
@@ -1094,17 +1080,11 @@ private extension BucketPartition {
                 throw ContinuumError.missingRemoteSource(namespace: namespace)
             }
 
-            continuumDebug(.remoteSourceStarted(logIdentity))
-            try Task.checkCancellation()
-            let remote = try await remoteSource.operation()
-            try Task.checkCancellation()
-            let snapshot = keySpace.normalized(remote.snapshot)
-            try await persistence.persist(snapshot)
-            try Task.checkCancellation()
-            return LoadOutcome(
-                snapshot: snapshot,
-                origin: .remote,
-                nextPage: remote.nextPage
+            return try await Self.remoteOutcome(
+                from: remoteSource,
+                keySpace: keySpace,
+                persistence: persistence,
+                logIdentity: logIdentity
             )
         }
         let flight = InFlight(
@@ -1127,52 +1107,23 @@ private extension BucketPartition {
         let logIdentity = logIdentity
         let operationID = currentOperationID
         let task = Task { [weak self] in
-            if shouldLoadLocalSources {
-                for (offset, source) in localSources.enumerated() {
-                    let index = offset + 1
-                    continuumDebug(
-                        .localSourceStarted(
-                            logIdentity,
-                            index: index,
-                            total: localSources.count
-                        )
-                    )
-                    try Task.checkCancellation()
-                    if let snapshot = try await source.operation() {
-                        try Task.checkCancellation()
-                        continuumDebug(
-                            .localSourceHit(
-                                logIdentity,
-                                index: index,
-                                count: keySpace.values(in: snapshot).count
-                            )
-                        )
-                        self?.publishCached(
-                            snapshot,
-                            generation: generation
-                        )
-                        break
-                    }
-                    continuumDebug(
-                        .localSourceMissed(
-                            logIdentity,
-                            index: index
-                        )
-                    )
-                }
+            if shouldLoadLocalSources,
+               let snapshot = try await Self.firstLocalSnapshot(
+                   from: localSources,
+                   keySpace: keySpace,
+                   logIdentity: logIdentity
+               ) {
+                self?.publishCached(
+                    snapshot,
+                    generation: generation
+                )
             }
 
-            continuumDebug(.remoteSourceStarted(logIdentity))
-            try Task.checkCancellation()
-            let remote = try await remoteSource.operation()
-            try Task.checkCancellation()
-            let snapshot = keySpace.normalized(remote.snapshot)
-            try await persistence.persist(snapshot)
-            try Task.checkCancellation()
-            return LoadOutcome(
-                snapshot: snapshot,
-                origin: .remote,
-                nextPage: remote.nextPage
+            return try await Self.remoteOutcome(
+                from: remoteSource,
+                keySpace: keySpace,
+                persistence: persistence,
+                logIdentity: logIdentity
             )
         }
         let flight = InFlight(
@@ -1193,17 +1144,11 @@ private extension BucketPartition {
         let logIdentity = logIdentity
         let operationID = currentOperationID
         let task = Task {
-            continuumDebug(.remoteSourceStarted(logIdentity))
-            try Task.checkCancellation()
-            let remote = try await remoteSource.operation()
-            try Task.checkCancellation()
-            let snapshot = keySpace.normalized(remote.snapshot)
-            try await persistence.persist(snapshot)
-            try Task.checkCancellation()
-            return LoadOutcome(
-                snapshot: snapshot,
-                origin: .remote,
-                nextPage: remote.nextPage
+            try await Self.remoteOutcome(
+                from: remoteSource,
+                keySpace: keySpace,
+                persistence: persistence,
+                logIdentity: logIdentity
             )
         }
         let flight = InFlight(
@@ -1213,6 +1158,63 @@ private extension BucketPartition {
         )
         start(flight)
         return flight
+    }
+
+    private static func firstLocalSnapshot(
+        from sources: [LocalSource<Space>],
+        keySpace: Space,
+        logIdentity: BucketLogIdentity
+    ) async throws -> Space.Snapshot? {
+        for (offset, source) in sources.enumerated() {
+            let index = offset + 1
+            continuumDebug(
+                .localSourceStarted(
+                    logIdentity,
+                    index: index,
+                    total: sources.count
+                )
+            )
+            try Task.checkCancellation()
+            if let snapshot = try await source.operation() {
+                try Task.checkCancellation()
+                continuumDebug(
+                    .localSourceHit(
+                        logIdentity,
+                        index: index,
+                        count: keySpace.values(in: snapshot).count
+                    )
+                )
+                return snapshot
+            }
+            continuumDebug(
+                .localSourceMissed(
+                    logIdentity,
+                    index: index
+                )
+            )
+        }
+
+        return nil
+    }
+
+    private static func remoteOutcome(
+        from source: RemoteSource<Space>,
+        keySpace: Space,
+        persistence: LocalPersistenceCoordinator<Space>,
+        logIdentity: BucketLogIdentity
+    ) async throws -> LoadOutcome {
+        continuumDebug(.remoteSourceStarted(logIdentity))
+        try Task.checkCancellation()
+        let remote = try await source.operation()
+        try Task.checkCancellation()
+        let snapshot = keySpace.normalized(remote.snapshot)
+        try await persistence.persist(snapshot)
+        try Task.checkCancellation()
+        return LoadOutcome(
+            snapshot: snapshot,
+            origin: .remote,
+            nextPage: remote.nextPage
+        )
     }
 
     private func resolve(
@@ -1302,11 +1304,12 @@ private extension BucketPartition {
         )
 
         if inFlight == nil {
-            loadState = LoadState(
-                isLoaded: loadState.isLoaded,
-                error: error
-            )
-            publishStreamChange()
+            publishStreamState {
+                loadState = LoadState(
+                    isLoaded: loadState.isLoaded,
+                    error: error
+                )
+            }
         }
 
         continuumDebug(
@@ -1353,12 +1356,13 @@ private extension BucketPartition {
             return
         }
 
-        storedSnapshot = .present(keySpace.normalized(snapshot))
-        loadState = LoadState(
-            isLoading: true,
-            isLoaded: true
-        )
-        publishStreamChange()
+        publishStreamState {
+            storedSnapshot = .present(keySpace.normalized(snapshot))
+            loadState = LoadState(
+                isLoading: true,
+                isLoaded: true
+            )
+        }
         if let operationID = inFlight?.operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 continuumDebug(
@@ -1376,25 +1380,26 @@ private extension BucketPartition {
 
         if inFlight?.generation == generation {
             let operationID = inFlight?.operationID
-            storedSnapshot = .present(outcome.snapshot)
-            inFlight = nil
-            remoteContinuationGeneration = nil
-            completedFlight = CompletedFlight(
-                generation: generation,
-                result: .success(outcome)
-            )
-            loadState = LoadState(isLoaded: true)
-            publishStreamChange()
-
-            if outcome.origin == .remote {
-                paginationCheckpoint = if remoteSource?.isPaginated == true {
-                    .available(outcome.nextPage)
-                } else {
-                    .unavailable
-                }
-                paginationState = PaginationState(
-                    hasNextPage: outcome.nextPage != nil
+            publishStreamState {
+                storedSnapshot = .present(outcome.snapshot)
+                inFlight = nil
+                remoteContinuationGeneration = nil
+                completedFlight = CompletedFlight(
+                    generation: generation,
+                    result: .success(outcome)
                 )
+                loadState = LoadState(isLoaded: true)
+
+                if outcome.origin == .remote {
+                    paginationCheckpoint = if remoteSource?.isPaginated == true {
+                        .available(outcome.nextPage)
+                    } else {
+                        .unavailable
+                    }
+                    paginationState = PaginationState(
+                        hasNextPage: outcome.nextPage != nil
+                    )
+                }
             }
 
             if let operationID {
@@ -1419,17 +1424,18 @@ private extension BucketPartition {
         }
 
         let operationID = inFlight?.operationID
-        inFlight = nil
-        remoteContinuationGeneration = nil
-        completedFlight = CompletedFlight(
-            generation: generation,
-            result: .failure(error)
-        )
-        loadState = LoadState(
-            isLoaded: loadState.isLoaded,
-            error: error
-        )
-        publishStreamChange()
+        publishStreamState {
+            inFlight = nil
+            remoteContinuationGeneration = nil
+            completedFlight = CompletedFlight(
+                generation: generation,
+                result: .failure(error)
+            )
+            loadState = LoadState(
+                isLoaded: loadState.isLoaded,
+                error: error
+            )
+        }
         if let operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 if error is CancellationError {
@@ -1627,18 +1633,19 @@ private extension BucketPartition {
                 }
 
                 let operationID = flight.operationID
-                storedSnapshot = .present(page.snapshot)
-                publishStreamChange()
-                paginationCheckpoint = .available(page.nextPage)
-                nextPageInFlight = nil
-                completedNextPageFlight = CompletedNextPageFlight(
-                    generation: flight.generation,
-                    identifier: flight.identifier,
-                    result: .success(page.snapshot)
-                )
-                paginationState = PaginationState(
-                    hasNextPage: page.nextPage != nil
-                )
+                publishStreamState {
+                    storedSnapshot = .present(page.snapshot)
+                    paginationCheckpoint = .available(page.nextPage)
+                    nextPageInFlight = nil
+                    completedNextPageFlight = CompletedNextPageFlight(
+                        generation: flight.generation,
+                        identifier: flight.identifier,
+                        result: .success(page.snapshot)
+                    )
+                    paginationState = PaginationState(
+                        hasNextPage: page.nextPage != nil
+                    )
+                }
                 ContinuumLogContext.withOperationID(operationID) {
                     continuumDebug(
                         .paginationCompleted(
