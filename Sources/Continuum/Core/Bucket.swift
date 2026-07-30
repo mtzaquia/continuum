@@ -278,6 +278,22 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         try await storage.reset()
     }
 
+    /// Schedules a reset without waiting for persistence to finish.
+    ///
+    /// This compatibility overload is deprecated because it cannot report a
+    /// persistence failure. Use ``reset()`` with `try await` to observe
+    /// completion and errors.
+    @available(
+        *,
+        deprecated,
+        message: "Use try await reset() to observe completion and errors."
+    )
+    func reset() {
+        Task { @MainActor in
+            try? await storage.reset()
+        }
+    }
+
     /// Resets observable memory and writable local snapshots.
     ///
     /// This compatibility overload is deprecated; ``reset()`` now always

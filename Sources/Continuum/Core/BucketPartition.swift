@@ -472,6 +472,22 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         }
     }
 
+    /// Schedules a reset without waiting for persistence to finish.
+    ///
+    /// This compatibility overload is deprecated because it cannot report a
+    /// persistence failure. Use ``reset()`` with `try await` to observe
+    /// completion and errors.
+    @available(
+        *,
+        deprecated,
+        message: "Use try await reset() to observe completion and errors."
+    )
+    public func reset() {
+        Task { @MainActor [weak self] in
+            try? await self?.reset()
+        }
+    }
+
     /// Resets observable memory and writable local snapshots.
     ///
     /// This compatibility overload is deprecated; ``reset()`` now always

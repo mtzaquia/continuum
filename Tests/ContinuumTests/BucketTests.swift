@@ -1636,6 +1636,33 @@ struct BucketTests {
         #expect(labels.resetValue != valueBeforeReset)
     }
 
+    @Test("The deprecated synchronous reset schedules the canonical reset")
+    func synchronousResetCompatibility() async throws {
+        let existing = Label(id: 1, text: "existing")
+        let writes = SnapshotRecorder<[Label]>()
+        let labels = Bucket(TestData.labels) {
+            LocalSource {
+                [existing]
+            } persist: { snapshot in
+                await writes.record(snapshot)
+            }
+        }
+
+        try await labels.store(existing)
+        func callLegacyReset() {
+            labels.reset()
+        }
+        callLegacyReset()
+
+        await writes.waitForSnapshots(2)
+        while labels.isLoaded {
+            await Task.yield()
+        }
+
+        #expect(await writes.snapshots == [[existing], nil])
+        #expect(labels.isLoaded == false)
+    }
+
     @Test("A memory reset prevents pending source work from publishing")
     func resetDuringLoad() async throws {
         let remote = SnapshotGate<[Label]>()

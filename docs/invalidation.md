@@ -8,6 +8,10 @@ from every writable local source:
 try await posts.reset()
 ```
 
+For source compatibility, a deprecated synchronous `reset()` overload remains.
+It schedules the same reset in a `Task` but cannot report persistence errors;
+new callers should use the async form above.
+
 Continuum resets memory and pagination state immediately, then sends `nil` to
 each writable `LocalSource` sequentially in declaration order. It stops at the
 first error. A failure restores the previous observable snapshot and pagination
