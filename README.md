@@ -12,6 +12,7 @@ display-ready data.
 - Distinguish untouched state from a successfully loaded empty result.
 - Observe values, loading, established-snapshot state, and failures with Swift
   Observation.
+- Subscribe to snapshot results and reset transitions as an asynchronous sequence.
 - Try local sources before remote, sharing cached work or superseding it when
   forced from remote.
 - Write normalized snapshots through to one or more local destinations.
@@ -122,6 +123,28 @@ if repository.posts.isLoaded && repository.posts.isEmpty {
   // The load succeeded and returned no posts.
 }
 ```
+
+Use `updates()` when a consumer needs an asynchronous sequence instead of
+property observation:
+
+```swift
+for await update in repository.posts.updates() {
+  switch update {
+  case .result(.success(let posts)):
+    render(posts)
+  case .result(.failure(let error)):
+    report(error)
+  case .reset:
+    clear()
+  }
+}
+```
+
+An established snapshot or current error is emitted immediately. Untouched and
+loading-without-data states remain silent; a successful empty snapshot is still
+emitted. A reset is emitted only while the bucket remains unavailable, so a
+replacement already available when observation resumes emits its result
+directly. Creating the sequence does not start a load.
 
 That is the core idea: each repository owns one narrow atomic snapshot; use
 cases compose repository models when a feature needs a broader result.

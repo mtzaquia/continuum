@@ -45,13 +45,11 @@ struct BucketTests {
 
         #expect(count.value == 3)
         #expect(count.isLoaded)
-        let valueBeforeRemoval = count.resetValue
 
         try await count.remove()
 
         #expect(count.value == nil)
         #expect(count.isLoaded == false)
-        #expect(count.resetValue != valueBeforeRemoval)
     }
 
     @Test("A stored value participates in observation tracking")
@@ -69,60 +67,33 @@ struct BucketTests {
         }
     }
 
-    @Test("A reset value is stable until an unavailable transition")
-    func resetValue() async throws {
+    @Test("Updates emit an established snapshot immediately")
+    func updatesEmitEstablishedSnapshot() async throws {
         let labels = Bucket(TestData.labels)
-        let initial = labels.resetValue
+        let expected = Label(id: 1, text: "one")
+        try await labels.store(expected)
+        var updates = labels.updates().makeAsyncIterator()
 
-        #expect(labels.resetValue == initial)
-
-        try await labels.reset()
-        let firstReset = labels.resetValue
-        #expect(firstReset != initial)
-        #expect(labels.resetValue == firstReset)
-
-        try await labels.reset()
-        #expect(labels.resetValue != firstReset)
-    }
-
-    @Test("A reset value participates in observation tracking")
-    func resetValueObservation() async throws {
-        let labels = Bucket(TestData.labels)
-
-        try await confirmation { changed in
-            withObservationTracking {
-                _ = labels.resetValue
-            } onChange: {
-                changed()
-            }
-
-            try await labels.reset()
+        guard case .result(.success(let snapshot))? = await updates.next() else {
+            Issue.record("Expected the established snapshot")
+            return
         }
+        #expect(snapshot == [expected])
     }
 
-    @Test("A reset value separates reset from a replacement snapshot")
-    func resetValuePrecedesReplacement() async throws {
+    @Test("Updates emit reset while the bucket remains unavailable")
+    func updatesEmitReset() async throws {
         let labels = Bucket(TestData.labels)
         try await labels.store(Label(id: 1, text: "before"))
-
-        var handled = labels.resetValue
-        func decision() -> String {
-            let current = labels.resetValue
-            if current != handled {
-                handled = current
-                return "reset"
-            }
-            return labels.isLoaded ? "yield" : "skip"
-        }
-
-        #expect(decision() == "yield")
+        var updates = labels.updates().makeAsyncIterator()
+        _ = await updates.next()
 
         try await labels.reset()
-        try await labels.store(Label(id: 2, text: "after"))
 
-        #expect(decision() == "reset")
-        #expect(labels[2]?.text == "after")
-        #expect(decision() == "yield")
+        guard case .reset? = await updates.next() else {
+            Issue.record("Expected reset")
+            return
+        }
     }
 
     @Test("An indexed subscript returns the model")
@@ -136,17 +107,22 @@ struct BucketTests {
         #expect(labels.value(for: 7) == label)
     }
 
-    @Test("Removing the final indexed value keeps the reset value")
+    @Test("Removing the final indexed value emits loaded empty")
     func indexedRemovalRemainsAvailable() async throws {
         let labels = Bucket(TestData.labels)
         try await labels.store(Label(id: 1, text: "one"))
-        let valueBeforeRemoval = labels.resetValue
+        var updates = labels.updates().makeAsyncIterator()
+        _ = await updates.next()
 
         try await labels.remove(1)
 
         #expect(labels.isLoaded)
         #expect(labels.isEmpty)
-        #expect(labels.resetValue == valueBeforeRemoval)
+        guard case .result(.success(let snapshot))? = await updates.next() else {
+            Issue.record("Expected a successful empty snapshot")
+            return
+        }
+        #expect(snapshot.isEmpty)
     }
 
     @Test("The outer key context types a singleton remote source")
@@ -221,24 +197,25 @@ struct BucketTests {
         #expect(await requested.value(for: .sell) == 1)
     }
 
-    @Test("Reset values are scoped to a partition lifetime")
-    func partitionedResetValues() async throws {
+    @Test("Update streams are scoped to a partition lifetime")
+    func partitionedUpdates() async throws {
         let labels = Bucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { _ in }
         let buying = labels[.buy]
         let selling = labels[.sell]
-        let buyingInitial = buying.resetValue
-        let sellingInitial = selling.resetValue
+        var buyingUpdates = buying.updates().makeAsyncIterator()
 
         #expect(buying === labels[.buy])
-        #expect(buyingInitial != sellingInitial)
 
         try await buying.reset()
 
-        #expect(buying.resetValue != buyingInitial)
-        #expect(selling.resetValue == sellingInitial)
+        guard case .reset? = await buyingUpdates.next() else {
+            Issue.record("Expected the selected partition to reset")
+            return
+        }
+        #expect(selling.isLoaded == false)
     }
 
     @Test("A loaded empty partition does not load another partition")
@@ -1626,14 +1603,12 @@ struct BucketTests {
 
         #expect(labels.isEmpty)
         #expect(labels.isLoaded)
-        let valueBeforeReset = labels.resetValue
 
         try await labels.reset()
 
         #expect(await writes.snapshots == [nil])
         #expect(labels.isEmpty)
         #expect(labels.isLoaded == false)
-        #expect(labels.resetValue != valueBeforeReset)
     }
 
     @Test("The deprecated synchronous reset schedules the canonical reset")
@@ -1732,16 +1707,21 @@ struct BucketTests {
             }
         }
         try await labels.store(existing)
-        let valueBeforeReset = labels.resetValue
+        var updates = labels.updates().makeAsyncIterator()
+        _ = await updates.next()
 
         await #expect(throws: TestError.self) {
             try await labels.reset()
         }
 
-        #expect(labels.resetValue != valueBeforeReset)
         #expect(labels.values == [existing])
         #expect(labels.isLoaded)
         #expect(labels.error is TestError)
+        guard case .result(.failure(let error))? = await updates.next() else {
+            Issue.record("Expected the reset failure")
+            return
+        }
+        #expect(error is TestError)
     }
 
     @Test("An invalidation signal resets local and in-memory state")

@@ -124,13 +124,13 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// The key that establishes this bucket's identity and snapshot behavior.
     public let keySpace: Space
 
-    /// The partition's observable comparison value for deliberate
-    /// unavailable-state publications.
-    public private(set) var resetValue = BucketResetValue()
-
     private var storedSnapshot: StoredSnapshot = .absent
     private var loadState = LoadState()
     private var paginationState = PaginationState()
+    private var streamVersion: UInt = 0
+
+    @ObservationIgnored
+    private var resetStreamVersion: UInt?
 
     @ObservationIgnored
     private let localSources: [LocalSource<Space>]
@@ -321,6 +321,89 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// bucket that has not established a snapshot.
     public var isEmpty: Bool {
         values.isEmpty
+    }
+
+    /// Creates a sequence of snapshot results and reset transitions.
+    ///
+    /// The sequence immediately emits an established snapshot or current error.
+    /// An untouched or loading bucket without a snapshot remains silent, while
+    /// an established empty snapshot emits a successful empty value. Reset emits
+    /// ``BucketUpdate/reset`` only while the bucket remains unavailable; a
+    /// replacement available before observation resumes emits its result directly.
+    ///
+    /// Creating the sequence does not start a load. Each call creates an
+    /// independent observation that ends when iteration is cancelled.
+    public func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
+        let baselineVersion = streamVersion
+
+        return AsyncStream(
+            bufferingPolicy: .unbounded
+        ) { continuation in
+            let producer = Task { @MainActor [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
+
+                let (changes, changeContinuation) = AsyncStream<Void>.makeStream(
+                    bufferingPolicy: .bufferingNewest(1)
+                )
+                var changeIterator = changes.makeAsyncIterator()
+                var handledVersion = baselineVersion
+                var needsInitialEvaluation = true
+
+                defer {
+                    changeContinuation.finish()
+                    continuation.finish()
+                }
+
+                while Task.isCancelled == false {
+                    let version = withObservationTracking {
+                        self.streamVersion
+                    } onChange: {
+                        changeContinuation.yield()
+                    }
+
+                    guard needsInitialEvaluation
+                            || version != handledVersion else {
+                        guard await changeIterator.next() != nil else { return }
+                        continue
+                    }
+
+                    needsInitialEvaluation = false
+                    handledVersion = version
+
+                    if self.resetStreamVersion == version,
+                       self.currentStreamResult == nil {
+                        await Task.yield()
+                        guard self.streamVersion == version else {
+                            continue
+                        }
+                    }
+
+                    let update: BucketUpdate<Space.Snapshot>? =
+                        if let result = self.currentStreamResult {
+                            .result(result)
+                        } else if self.resetStreamVersion == version,
+                                  version != baselineVersion {
+                            .reset
+                        } else {
+                            nil
+                        }
+
+                    if let update,
+                       case .terminated = continuation.yield(update) {
+                        return
+                    }
+
+                    guard await changeIterator.next() != nil else { return }
+                }
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                producer.cancel()
+            }
+        }
     }
 
     /// Loads and atomically publishes the complete snapshot.
@@ -575,6 +658,26 @@ private extension BucketPartition {
         }
     }
 
+    var currentStreamResult: Result<Space.Snapshot, any Error>? {
+        if let error = loadState.error {
+            return .failure(error)
+        }
+        guard loadState.isLoaded, let snapshot else {
+            return nil
+        }
+        return .success(snapshot)
+    }
+
+    func publishStreamChange() {
+        streamVersion &+= 1
+    }
+
+    func publishStreamReset() {
+        let version = streamVersion &+ 1
+        resetStreamVersion = version
+        streamVersion = version
+    }
+
     var currentOperationID: String {
         ContinuumLogContext.operationID
             ?? ContinuumLogContext.makeIdentifier()
@@ -692,6 +795,7 @@ private extension BucketPartition {
         let previousSnapshot = snapshot
         let previousPaginationCheckpoint = paginationCheckpoint
         let resetsPagination: Bool
+        let publishesReset: Bool
 
         do {
             let updated: Space.Snapshot?
@@ -705,20 +809,19 @@ private extension BucketPartition {
                     )
                 )
                 resetsPagination = false
+                publishesReset = false
             case .remove(let input):
                 updated = keySpace.removing(input, from: previousSnapshot)
                     .map(keySpace.normalized)
                 resetsPagination = false
-                if previousSnapshot != nil, updated == nil {
-                    resetValue = resetValue.advanced()
-                }
+                publishesReset = previousSnapshot != nil && updated == nil
             case .reset:
                 updated = nil
                 resetsPagination = true
-                resetValue = resetValue.advanced()
+                publishesReset = true
             }
 
-            publishMutation(updated)
+            publishMutation(updated, resetsStream: publishesReset)
             if resetsPagination {
                 clearPagination()
             }
@@ -800,13 +903,22 @@ private extension BucketPartition {
         }
     }
 
-    private func publishMutation(_ snapshot: Space.Snapshot?) {
+    private func publishMutation(
+        _ snapshot: Space.Snapshot?,
+        resetsStream: Bool = false
+    ) {
         if let snapshot {
             storedSnapshot = .present(snapshot)
             loadState = LoadState(isLoaded: true)
         } else {
             storedSnapshot = .absent
             loadState = LoadState()
+        }
+
+        if resetsStream {
+            publishStreamReset()
+        } else {
+            publishStreamChange()
         }
     }
 
@@ -827,6 +939,7 @@ private extension BucketPartition {
             isLoaded: snapshot != nil,
             error: error
         )
+        publishStreamChange()
         if let paginationCheckpoint {
             self.paginationCheckpoint = paginationCheckpoint
             paginationState = PaginationState(
@@ -863,6 +976,7 @@ private extension BucketPartition {
                 isLoaded: loadState.isLoaded,
                 error: error
             )
+            publishStreamChange()
         }
     }
 
@@ -1192,6 +1306,7 @@ private extension BucketPartition {
                 isLoaded: loadState.isLoaded,
                 error: error
             )
+            publishStreamChange()
         }
 
         continuumDebug(
@@ -1243,6 +1358,7 @@ private extension BucketPartition {
             isLoading: true,
             isLoaded: true
         )
+        publishStreamChange()
         if let operationID = inFlight?.operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 continuumDebug(
@@ -1268,6 +1384,7 @@ private extension BucketPartition {
                 result: .success(outcome)
             )
             loadState = LoadState(isLoaded: true)
+            publishStreamChange()
 
             if outcome.origin == .remote {
                 paginationCheckpoint = if remoteSource?.isPaginated == true {
@@ -1312,6 +1429,7 @@ private extension BucketPartition {
             isLoaded: loadState.isLoaded,
             error: error
         )
+        publishStreamChange()
         if let operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 if error is CancellationError {
@@ -1510,6 +1628,7 @@ private extension BucketPartition {
 
                 let operationID = flight.operationID
                 storedSnapshot = .present(page.snapshot)
+                publishStreamChange()
                 paginationCheckpoint = .available(page.nextPage)
                 nextPageInFlight = nil
                 completedNextPageFlight = CompletedNextPageFlight(

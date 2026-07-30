@@ -20,6 +20,9 @@
 //  SOFTWARE.
 //
 
+/// A convenience typealias for an indexed key that leverages an `Identifiable` type.
+public typealias IdentifiedKey<Value: Sendable & Identifiable> = IndexedKey<Value.ID, Value>
+
 /// A typed key for one atomic, insertion-ordered collection.
 ///
 /// Sources load the whole collection as `[Value]`. The index operation derives

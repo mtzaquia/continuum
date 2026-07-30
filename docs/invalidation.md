@@ -18,6 +18,11 @@ first error. A failure restores the previous observable snapshot and pagination
 checkpoint, attempts to restore local persistence, appears as `error`, and
 causes the call to throw.
 
+An active `updates()` sequence emits `.reset` while the bucket remains
+unavailable. If replacement data is already available when observation resumes,
+it emits that result directly. A failed reset emits its failure after state is
+restored.
+
 The parameterized `reset(including:)` overload is deprecated and forwards to
 `reset()`.
 

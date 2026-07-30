@@ -20,28 +20,11 @@
 //  SOFTWARE.
 //
 
-import Foundation
+/// An update emitted by a bucket's ``Bucket/updates()`` sequence.
+nonisolated public enum BucketUpdate<Snapshot: Sendable>: Sendable {
+    /// The bucket established a snapshot or reported an error.
+    case result(Result<Snapshot, any Error>)
 
-/// An opaque comparison value for deliberate unavailable-state publications.
-///
-/// A value is stable across repeated reads and changes before its partition
-/// publishes unavailable state. The change is not rolled back if persistence
-/// later restores the previous snapshot.
-nonisolated public struct BucketResetValue: Equatable, Sendable {
-    private let sourceID: UUID
-    private let revision: UInt
-
-    init() {
-        sourceID = UUID()
-        revision = 0
-    }
-
-    private init(sourceID: UUID, revision: UInt) {
-        self.sourceID = sourceID
-        self.revision = revision
-    }
-
-    func advanced() -> Self {
-        Self(sourceID: sourceID, revision: revision &+ 1)
-    }
+    /// The bucket returned to its initial unavailable state.
+    case reset
 }

@@ -133,12 +133,6 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         storage.state
     }
 
-    /// The bucket's observable comparison value for deliberate
-    /// unavailable-state publications.
-    var resetValue: BucketResetValue {
-        storage.resetValue
-    }
-
     /// Whether source work is currently active for this bucket.
     var isLoading: Bool {
         storage.isLoading
@@ -200,6 +194,14 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// bucket that has not established a snapshot.
     var isEmpty: Bool {
         storage.isEmpty
+    }
+
+    /// Creates a sequence of snapshot results and reset transitions.
+    ///
+    /// Creating the sequence does not start a load. See
+    /// ``BucketPartition/updates()`` for its delivery semantics.
+    func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
+        storage.updates()
     }
 
     /// Loads and atomically publishes the complete snapshot.
