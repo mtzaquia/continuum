@@ -82,7 +82,6 @@ nonisolated struct BucketLogIdentity: Equatable, Sendable {
 nonisolated enum BucketMutationKind: String, Sendable {
     case store
     case remove
-    case resetMemory = "reset-memory"
     case resetLocal = "reset-local"
 }
 
@@ -96,6 +95,11 @@ nonisolated enum ContinuumLogEvent {
         invalidationSignals: Int
     )
     case loadRequested(
+        BucketLogIdentity,
+        policy: LoadPolicy,
+        established: Bool
+    )
+    case loadRequestedWithoutSources(
         BucketLogIdentity,
         policy: LoadPolicy,
         established: Bool
@@ -171,6 +175,7 @@ nonisolated enum ContinuumLogEvent {
              .persistenceCompleted:
             .trace
         case .loadRequested,
+             .loadRequestedWithoutSources,
              .loadReturnedMemory,
              .loadJoined,
              .localSourceHit,
@@ -197,6 +202,7 @@ nonisolated enum ContinuumLogEvent {
         case .bucketConfigured:
             "lifecycle"
         case .loadRequested,
+             .loadRequestedWithoutSources,
              .loadReturnedMemory,
              .loadJoined,
              .localSourceStarted,
@@ -233,6 +239,8 @@ nonisolated enum ContinuumLogEvent {
         switch self {
         case .bucketConfigured:
             "•"
+        case .loadRequestedWithoutSources:
+            "⚠"
         case .loadRequested,
              .localSourceStarted,
              .remoteSourceStarted,
@@ -293,6 +301,15 @@ nonisolated enum ContinuumLogEvent {
             """
             requested \(bucket.rendered) policy=\(policy.debugName) \
             established=\(established)
+            """
+        case .loadRequestedWithoutSources(
+            let bucket,
+            let policy,
+            let established
+        ):
+            """
+            requested load for source-less in-memory bucket \(bucket.rendered) \
+            policy=\(policy.debugName) established=\(established)
             """
         case .loadReturnedMemory(let bucket, let count):
             "returned established memory \(bucket.rendered) count=\(count)"
@@ -490,6 +507,19 @@ nonisolated func continuumDebug(
         category: event.category
     ).debug("\(message, privacy: .public)")
     #endif
+}
+
+nonisolated func continuumWarning(
+    _ event: @autoclosure () -> ContinuumLogEvent
+) {
+    let event = event()
+    let message = event.renderedMessage(
+        operationID: ContinuumLogContext.operationID
+    )
+    Logger(
+        subsystem: "eu.lelfe.Continuum",
+        category: event.category
+    ).warning("\(message, privacy: .public)")
 }
 
 private nonisolated func continuumEscaped(_ value: String) -> String {

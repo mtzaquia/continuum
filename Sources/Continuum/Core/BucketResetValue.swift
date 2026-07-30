@@ -20,34 +20,32 @@
 //  SOFTWARE.
 //
 
-/// The current loading state of one atomic data bucket.
+import Foundation
+
+/// An opaque comparison value for unavailable-state transitions in one bucket partition.
 ///
-/// Loading, established-snapshot state, and the latest operation error are
-/// independent. A refresh or reset can therefore fail while
-/// ``isLoaded`` remains `true`.
-public struct LoadState: Sendable {
-    /// Whether source work is currently active.
-    public let isLoading: Bool
+/// A value is stable across repeated reads and changes when its partition
+/// deliberately returns to an unavailable state. Retain the last value handled
+/// by an observation source and compare it with the partition's current
+/// ``BucketPartition/resetValue`` to recognize a reset without representing
+/// reset as a snapshot value. Seed that retained value from the current value
+/// when an observation starts to avoid replaying a reset that happened before
+/// subscription.
+nonisolated public struct BucketResetValue: Equatable, Sendable {
+    private let sourceID: UUID
+    private let revision: UInt
 
-    /// Whether the bucket has established a complete snapshot.
-    ///
-    /// A successfully loaded empty indexed snapshot sets this value to `true`.
-    public let isLoaded: Bool
+    init() {
+        sourceID = UUID()
+        revision = 0
+    }
 
-    /// The latest snapshot-loading, mutation, persistence, or invalidation error.
-    ///
-    /// Starting another load or mutation clears the previous error. A reset
-    /// clears it on success. Continuation failures are reported separately by
-    /// ``PaginationState``.
-    public let error: (any Error)?
+    private init(sourceID: UUID, revision: UInt) {
+        self.sourceID = sourceID
+        self.revision = revision
+    }
 
-    init(
-        isLoading: Bool = false,
-        isLoaded: Bool = false,
-        error: (any Error)? = nil
-    ) {
-        self.isLoading = isLoading
-        self.isLoaded = isLoaded
-        self.error = error
+    func advanced() -> Self {
+        Self(sourceID: sourceID, revision: revision &+ 1)
     }
 }

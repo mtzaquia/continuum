@@ -112,8 +112,7 @@ ambiguously, so this is UI and local-state rollback rather than a distributed
 transaction.
 
 Concurrent explicit mutations are serialized across the complete pipeline.
-`reset()` and `reset(including: .localSources)` do not invoke remote mutation
-capabilities.
+`reset()` does not invoke remote mutation capabilities.
 
 ## Combine mutations with pagination
 

@@ -225,13 +225,21 @@ final class DemoCatalog {
         )
     }
 
-    func resetCatalog() {
-        products.reset()
-        record(
-            .cache,
-            title: "Memory reset",
-            detail: "The persisted cache still exists. Refresh to watch it return."
-        )
+    func resetCatalog() async {
+        do {
+            try await products.reset()
+            record(
+                .cache,
+                title: "Catalog reset",
+                detail: "Memory and writable local snapshots were cleared."
+            )
+        } catch {
+            record(
+                .failure,
+                title: "Reset failed",
+                detail: "The previous catalog snapshot was restored."
+            )
+        }
     }
 
     private func record(

@@ -23,6 +23,11 @@ struct DiagnosticsTests {
         let error = SensitiveError(secret: "never-log-me")
         let normalEvents: [ContinuumLogEvent] = [
             .loadRequested(identity, policy: .cached, established: false),
+            .loadRequestedWithoutSources(
+                identity,
+                policy: .cached,
+                established: false
+            ),
             .loadReturnedMemory(identity, count: 2),
             .loadJoined(identity, activeOperationID: "AAAA1111"),
             .localSourceHit(identity, index: 1, count: 2),
@@ -127,6 +132,23 @@ struct DiagnosticsTests {
                 bucket="posts\\n\\\"private\\\"\\\\archive" \
                 version=3 instance=FACE1234 \
                 policy=cached-then-remote established=true
+                """
+        )
+    }
+
+    @Test("Source-less load warnings identify in-memory buckets")
+    func sourceLessLoadWarningRendering() {
+        let event = ContinuumLogEvent.loadRequestedWithoutSources(
+            identity,
+            policy: .remote,
+            established: false
+        )
+
+        #expect(
+            event.renderedMessage(operationID: "12ab34cd-more")
+                == """
+                [load][op:12AB34CD] ⚠ requested load for source-less in-memory bucket \
+                bucket="posts" version=2 instance=FACE1234 policy=remote established=false
                 """
         )
     }

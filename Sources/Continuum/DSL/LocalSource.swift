@@ -54,8 +54,7 @@ public struct LocalSource<Space: ContinuumKeySpace>: Sendable {
     /// `nil` means no snapshot is persisted; an empty indexed snapshot remains
     /// a present, successfully established value. Remote results and explicit
     /// bucket mutations write through to this operation. ``Bucket/reset()``
-    /// changes memory only; ``Bucket/reset(including:)`` can also remove
-    /// writable local snapshots.
+    /// also removes writable local snapshots.
     ///
     /// ```swift
     /// LocalSource {
