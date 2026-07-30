@@ -22,15 +22,11 @@
 
 import Foundation
 
-/// An opaque comparison value for unavailable-state transitions in one bucket partition.
+/// An opaque comparison value for deliberate unavailable-state publications.
 ///
-/// A value is stable across repeated reads and changes when its partition
-/// deliberately returns to an unavailable state. Retain the last value handled
-/// by an observation source and compare it with the partition's current
-/// ``BucketPartition/resetValue`` to recognize a reset without representing
-/// reset as a snapshot value. Seed that retained value from the current value
-/// when an observation starts to avoid replaying a reset that happened before
-/// subscription.
+/// A value is stable across repeated reads and changes before its partition
+/// publishes unavailable state. The change is not rolled back if persistence
+/// later restores the previous snapshot.
 nonisolated public struct BucketResetValue: Equatable, Sendable {
     private let sourceID: UUID
     private let revision: UInt

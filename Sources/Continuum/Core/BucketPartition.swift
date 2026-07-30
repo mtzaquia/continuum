@@ -124,15 +124,8 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// The key that establishes this bucket's identity and snapshot behavior.
     public let keySpace: Space
 
-    /// An opaque value that changes whenever this partition returns to an
-    /// unavailable state.
-    ///
-    /// The value is stable across repeated reads. Observation sources can
-    /// retain the last value they handled and compare it with this property to
-    /// recognize a reset independently from the current snapshot. The value is
-    /// advanced when the unavailable state is published optimistically, so a
-    /// same-turn replacement snapshot remains available on the next
-    /// observation evaluation even when local persistence later fails.
+    /// The partition's observable comparison value for deliberate
+    /// unavailable-state publications.
     public private(set) var resetValue = BucketResetValue()
 
     private var storedSnapshot: StoredSnapshot = .absent

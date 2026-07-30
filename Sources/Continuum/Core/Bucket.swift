@@ -133,14 +133,8 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         storage.state
     }
 
-    /// An opaque value that changes whenever this bucket returns to an
-    /// unavailable state.
-    ///
-    /// Retain the last value handled by an observation source and compare it
-    /// with this property to recognize reset independently from the current
-    /// snapshot. Seed that retained value from the current value when an
-    /// observation starts to avoid replaying a reset that happened before
-    /// subscription.
+    /// The bucket's observable comparison value for deliberate
+    /// unavailable-state publications.
     var resetValue: BucketResetValue {
         storage.resetValue
     }
