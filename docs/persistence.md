@@ -59,12 +59,11 @@ every local destination. A remote failure restores the prior snapshot. See
 [Mutating remote values](remote-mutations.md) for ordering and failure
 behavior.
 
-`reset()` forgets observable memory and pagination state without deleting
-durable data. Include local sources when both layers should return to an absent
-state:
+`reset()` forgets observable memory and pagination state and deletes the
+snapshots held by every writable local source:
 
 ```swift
-try await posts.reset(including: .localSources)
+try await posts.reset()
 ```
 
 Memory and pagination reset immediately, then every writable destination
@@ -73,9 +72,9 @@ state and attempts to restore local persistence. An indexed source returning
 `[]` establishes a known empty snapshot; a successful remote result writes it
 through, while `nil` remains absent.
 
-`InvalidationSignal` always uses this local-inclusive reset depth for its
-events. It is appropriate when a cached snapshot is known stale and must not be
-restored by a later `.cached` load; it does not offer a memory-only option.
+`InvalidationSignal` uses this same reset behavior for its events. It is
+appropriate when a cached snapshot is known stale and must not be restored by a
+later `.cached` load.
 
 ## Use several writable destinations
 

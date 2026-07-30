@@ -65,6 +65,9 @@ public final class Bucket<
 
     /// Creates an observable in-memory data bucket.
     ///
+    /// This bucket has no loading sources. Calling ``Bucket/load(using:)``
+    /// emits a runtime warning; use mutations to manage its in-memory state.
+    ///
     /// - Parameter keySpace: The key whose atomic snapshot this bucket owns.
     public init(_ keySpace: Space) where Scope == UnpartitionedBucketScope {
         self.keySpace = keySpace
@@ -128,6 +131,18 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// The bucket's complete loading state.
     var state: LoadState {
         storage.state
+    }
+
+    /// An opaque value that changes whenever this bucket returns to an
+    /// unavailable state.
+    ///
+    /// Retain the last value handled by an observation source and compare it
+    /// with this property to recognize reset independently from the current
+    /// snapshot. Seed that retained value from the current value when an
+    /// observation starts to avoid replaying a reset that happened before
+    /// subscription.
+    var resetValue: BucketResetValue {
+        storage.resetValue
     }
 
     /// Whether source work is currently active for this bucket.
@@ -201,6 +216,8 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// its required remote phase. A remote load supersedes active work and starts
     /// directly at the remote source. Before a remote result enters memory,
     /// writable local sources persist it in declaration order.
+    /// Loading a bucket with no local or remote source emits a runtime warning;
+    /// such a bucket is intended to be used as an in-memory bucket.
     ///
     /// - Parameter policy: The way established and local snapshots should be
     ///   treated.
@@ -247,28 +264,34 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         try await storage.remove(input)
     }
 
-    /// Forgets the current snapshot and returns the bucket to its initial state.
+    /// Forgets the current snapshot, pagination state, and writable local
+    /// snapshots, returning the bucket to its initial state.
     ///
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
-    /// Reset affects memory only and does not call writable local
-    /// sources. It cancels active source and mutation tasks and prevents their
-    /// results from entering local persistence or memory.
-    func reset() {
-        storage.reset()
+    /// Observable memory resets before writable local sources receive `nil` in
+    /// declaration order. A failure restores the previous observable state,
+    /// attempts to restore local persistence, and becomes ``error``.
+    ///
+    /// - Throws: An error raised by a writable ``LocalSource``.
+    func reset() async throws {
+        try await storage.reset()
     }
 
-    /// Removes writable local snapshots and resets observable memory.
+    /// Resets observable memory and writable local snapshots.
     ///
-    /// Observable memory and pagination reset immediately. Writable local
-    /// sources then receive `nil` sequentially in declaration order.
+    /// This compatibility overload is deprecated; ``reset()`` now always
+    /// removes writable local snapshots.
     ///
-    /// - Parameter scope: The additional storage to include in the reset.
-    /// - Throws: An error raised by a writable ``LocalSource``. A failure
-    ///   restores the previous snapshot and pagination checkpoint in observable
-    ///   memory, attempts to restore local persistence, and becomes ``error``.
-    func reset(including scope: ResetScope) async throws {
-        try await storage.reset(including: scope)
+    /// - Parameter scope: Ignored. It is retained for source compatibility.
+    /// - Throws: An error raised by a writable ``LocalSource``.
+    @available(
+        *,
+        deprecated,
+        message: "Use reset(); it always clears writable local snapshots."
+    )
+    func reset(including _: ResetScope) async throws {
+        try await storage.reset()
     }
 }
 

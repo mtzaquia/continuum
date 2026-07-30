@@ -45,11 +45,13 @@ struct BucketTests {
 
         #expect(count.value == 3)
         #expect(count.isLoaded)
+        let valueBeforeRemoval = count.resetValue
 
         try await count.remove()
 
         #expect(count.value == nil)
         #expect(count.isLoaded == false)
+        #expect(count.resetValue != valueBeforeRemoval)
     }
 
     @Test("A stored value participates in observation tracking")
@@ -67,6 +69,62 @@ struct BucketTests {
         }
     }
 
+    @Test("A reset value is stable until an unavailable transition")
+    func resetValue() async throws {
+        let labels = Bucket(TestData.labels)
+        let initial = labels.resetValue
+
+        #expect(labels.resetValue == initial)
+
+        try await labels.reset()
+        let firstReset = labels.resetValue
+        #expect(firstReset != initial)
+        #expect(labels.resetValue == firstReset)
+
+        try await labels.reset()
+        #expect(labels.resetValue != firstReset)
+    }
+
+    @Test("A reset value participates in observation tracking")
+    func resetValueObservation() async throws {
+        let labels = Bucket(TestData.labels)
+
+        try await confirmation { changed in
+            withObservationTracking {
+                _ = labels.resetValue
+            } onChange: {
+                changed()
+            }
+
+            try await labels.reset()
+        }
+    }
+
+    @Test("A reset value separates reset from a replacement snapshot")
+    func resetValuePrecedesReplacement() async throws {
+        let labels = Bucket(TestData.labels)
+        try await labels.store(Label(id: 1, text: "before"))
+
+        var handled = labels.resetValue
+        func decision() -> String {
+            let current = labels.resetValue
+            if current != handled {
+                handled = current
+                return "reset"
+            }
+            return labels.isLoaded ? "yield" : "skip"
+        }
+
+        #expect(decision() == "yield")
+
+        try await labels.reset()
+        try await labels.store(Label(id: 2, text: "after"))
+
+        #expect(decision() == "reset")
+        #expect(labels[2]?.text == "after")
+        #expect(decision() == "yield")
+    }
+
     @Test("An indexed subscript returns the model")
     func indexedSubscript() async throws {
         let labels = Bucket(TestData.labels)
@@ -76,6 +134,19 @@ struct BucketTests {
 
         #expect(labels[7] == label)
         #expect(labels.value(for: 7) == label)
+    }
+
+    @Test("Removing the final indexed value keeps the reset value")
+    func indexedRemovalRemainsAvailable() async throws {
+        let labels = Bucket(TestData.labels)
+        try await labels.store(Label(id: 1, text: "one"))
+        let valueBeforeRemoval = labels.resetValue
+
+        try await labels.remove(1)
+
+        #expect(labels.isLoaded)
+        #expect(labels.isEmpty)
+        #expect(labels.resetValue == valueBeforeRemoval)
     }
 
     @Test("The outer key context types a singleton remote source")
@@ -148,6 +219,26 @@ struct BucketTests {
         #expect(selling[2]?.text == "sell")
         #expect(await requested.value(for: .buy) == 1)
         #expect(await requested.value(for: .sell) == 1)
+    }
+
+    @Test("Reset values are scoped to a partition lifetime")
+    func partitionedResetValues() async throws {
+        let labels = Bucket(
+            TestData.labels,
+            partitionedBy: Purpose.self
+        ) { _ in }
+        let buying = labels[.buy]
+        let selling = labels[.sell]
+        let buyingInitial = buying.resetValue
+        let sellingInitial = selling.resetValue
+
+        #expect(buying === labels[.buy])
+        #expect(buyingInitial != sellingInitial)
+
+        try await buying.reset()
+
+        #expect(buying.resetValue != buyingInitial)
+        #expect(selling.resetValue == sellingInitial)
     }
 
     @Test("A loaded empty partition does not load another partition")
@@ -361,7 +452,12 @@ struct BucketTests {
         #expect(labels.values == [Label(id: 1, text: "draft")])
         #expect(await writes.snapshots == [[Label(id: 1, text: "draft")]])
 
-        labels.reset()
+        let reset = Task {
+            try await labels.reset()
+        }
+        while labels.isLoaded {
+            await Task.yield()
+        }
         await remoteStore.complete(
             load: 1,
             with: Label(id: 1, text: "published")
@@ -370,7 +466,11 @@ struct BucketTests {
         await #expect(throws: CancellationError.self) {
             try await mutation.value
         }
-        #expect(await writes.snapshots == [[Label(id: 1, text: "draft")]])
+        try await reset.value
+        #expect(
+            await writes.snapshots
+                == [[Label(id: 1, text: "draft")], nil]
+        )
         #expect(labels.isLoaded == false)
         #expect(labels.isEmpty)
     }
@@ -1313,7 +1413,7 @@ struct BucketTests {
         _ = try await labels.load()
 
         await #expect(throws: TestError.self) {
-            try await labels.reset(including: .localSources)
+            try await labels.reset()
         }
 
         let snapshots = await writes.snapshots
@@ -1526,12 +1626,14 @@ struct BucketTests {
 
         #expect(labels.isEmpty)
         #expect(labels.isLoaded)
+        let valueBeforeReset = labels.resetValue
 
-        labels.reset()
+        try await labels.reset()
 
-        #expect(await writes.snapshots.isEmpty)
+        #expect(await writes.snapshots == [nil])
         #expect(labels.isEmpty)
         #expect(labels.isLoaded == false)
+        #expect(labels.resetValue != valueBeforeReset)
     }
 
     @Test("A memory reset prevents pending source work from publishing")
@@ -1547,7 +1649,7 @@ struct BucketTests {
         }
         await remote.waitForLoads(1)
 
-        labels.reset()
+        try await labels.reset()
         await remote.complete(
             load: 1,
             with: [Label(id: 1, text: "obsolete")]
@@ -1560,7 +1662,7 @@ struct BucketTests {
         #expect(labels.isEmpty)
     }
 
-    @Test("A local-inclusive reset removes persistence and memory")
+    @Test("A reset removes persistence and memory")
     func localInclusiveReset() async throws {
         let existing = Label(id: 1, text: "one")
         let writes = PersistenceGate<[Label]>()
@@ -1574,7 +1676,7 @@ struct BucketTests {
         _ = try await labels.load()
 
         let mutation = Task {
-            try await labels.reset(including: .localSources)
+            try await labels.reset()
         }
         await writes.waitForWrites(1)
 
@@ -1590,7 +1692,7 @@ struct BucketTests {
         #expect(labels.error == nil)
     }
 
-    @Test("A failed local-inclusive reset preserves memory")
+    @Test("A failed reset preserves memory")
     func localInclusiveResetFailure() async throws {
         let existing = Label(id: 1, text: "existing")
         let labels = Bucket(TestData.labels) {
@@ -1603,11 +1705,13 @@ struct BucketTests {
             }
         }
         try await labels.store(existing)
+        let valueBeforeReset = labels.resetValue
 
         await #expect(throws: TestError.self) {
-            try await labels.reset(including: .localSources)
+            try await labels.reset()
         }
 
+        #expect(labels.resetValue != valueBeforeReset)
         #expect(labels.values == [existing])
         #expect(labels.isLoaded)
         #expect(labels.error is TestError)

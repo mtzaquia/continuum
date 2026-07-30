@@ -124,6 +124,17 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// The key that establishes this bucket's identity and snapshot behavior.
     public let keySpace: Space
 
+    /// An opaque value that changes whenever this partition returns to an
+    /// unavailable state.
+    ///
+    /// The value is stable across repeated reads. Observation sources can
+    /// retain the last value they handled and compare it with this property to
+    /// recognize a reset independently from the current snapshot. The value is
+    /// advanced when the unavailable state is published optimistically, so a
+    /// same-turn replacement snapshot remains available on the next
+    /// observation evaluation even when local persistence later fails.
+    public private(set) var resetValue = BucketResetValue()
+
     private var storedSnapshot: StoredSnapshot = .absent
     private var loadState = LoadState()
     private var paginationState = PaginationState()
@@ -327,6 +338,8 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// its required remote phase. A remote load supersedes active work and starts
     /// directly at the remote source. Before a remote result enters memory,
     /// writable local sources persist it in declaration order.
+    /// Loading a bucket with no local or remote source emits a runtime warning;
+    /// such a bucket is intended to be used as an in-memory bucket.
     ///
     /// - Parameter policy: The way established and local snapshots should be
     ///   treated.
@@ -346,6 +359,15 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
                     established: loadState.isLoaded
                 )
             )
+            if localSources.isEmpty, remoteSource == nil {
+                continuumWarning(
+                    .loadRequestedWithoutSources(
+                        logIdentity,
+                        policy: policy,
+                        established: loadState.isLoaded
+                    )
+                )
+            }
 
             switch policy {
             case .cached:
@@ -390,23 +412,27 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         try await enqueue(.remove(input))
     }
 
-    /// Forgets the current snapshot and returns the bucket to its initial state.
+    /// Forgets the current snapshot, pagination state, and writable local
+    /// snapshots, returning the partition to its initial state.
     ///
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
-    /// Reset affects memory only and does not call writable local
-    /// sources. It cancels active source and mutation tasks and prevents their
-    /// results from entering local persistence or memory.
-    public func reset() {
-        ContinuumLogContext.withOperation {
+    /// Observable memory resets before writable local sources receive `nil` in
+    /// declaration order. A failure restores the previous observable state,
+    /// attempts to restore local persistence, and becomes ``error``.
+    ///
+    /// - Throws: An error raised by a writable ``LocalSource``. Cancellation
+    ///   and source-generation checks prevent superseded work from publishing.
+    public func reset() async throws {
+        try await ContinuumLogContext.withOperation {
             continuumDebug(
                 .mutationRequested(
                     logIdentity,
-                    kind: .resetMemory,
+                    kind: .resetLocal,
                     queued: false
                 )
             )
-            logSupersededWork(replacement: BucketMutationKind.resetMemory.rawValue)
+            logSupersededWork(replacement: BucketMutationKind.resetLocal.rawValue)
             supersedeSourceWork()
             mutationEpoch &+= 1
             for task in mutationTasks.values {
@@ -414,34 +440,52 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
             }
             mutationTasks.removeAll()
             mutationTail = nil
-            storedSnapshot = .absent
-            loadState = LoadState()
-            clearPagination()
-            continuumDebug(
-                .mutationCompleted(
-                    logIdentity,
-                    kind: .resetMemory,
-                    count: 0,
-                    established: false
+
+            do {
+                try await perform(.reset, epoch: mutationEpoch)
+                continuumDebug(
+                    .mutationCompleted(
+                        logIdentity,
+                        kind: .resetLocal,
+                        count: snapshot.map(snapshotCount) ?? 0,
+                        established: loadState.isLoaded
+                    )
                 )
-            )
+            } catch is CancellationError {
+                continuumDebug(
+                    .operationCancelled(
+                        logIdentity,
+                        operation: BucketMutationKind.resetLocal.rawValue
+                    )
+                )
+                throw CancellationError()
+            } catch {
+                continuumDebug(
+                    .operationFailed(
+                        logIdentity,
+                        operation: BucketMutationKind.resetLocal.rawValue,
+                        error: error
+                    )
+                )
+                throw error
+            }
         }
     }
 
-    /// Removes writable local snapshots and resets observable memory.
+    /// Resets observable memory and writable local snapshots.
     ///
-    /// Observable memory and pagination reset immediately. Writable local
-    /// sources then receive `nil` sequentially in declaration order.
+    /// This compatibility overload is deprecated; ``reset()`` now always
+    /// removes writable local snapshots.
     ///
-    /// - Parameter scope: The additional storage to include in the reset.
-    /// - Throws: An error raised by a writable ``LocalSource``. A failure
-    ///   restores the previous snapshot and pagination checkpoint in observable
-    ///   memory, attempts to restore local persistence, and becomes ``error``.
-    public func reset(including scope: ResetScope) async throws {
-        switch scope {
-        case .localSources:
-            try await enqueue(.reset)
-        }
+    /// - Parameter scope: Ignored. It is retained for source compatibility.
+    /// - Throws: An error raised by a writable ``LocalSource``.
+    @available(
+        *,
+        deprecated,
+        message: "Use reset(); it always clears writable local snapshots."
+    )
+    public func reset(including _: ResetScope) async throws {
+        try await reset()
     }
 }
 
@@ -656,9 +700,13 @@ private extension BucketPartition {
                 updated = keySpace.removing(input, from: previousSnapshot)
                     .map(keySpace.normalized)
                 resetsPagination = false
+                if previousSnapshot != nil, updated == nil {
+                    resetValue = resetValue.advanced()
+                }
             case .reset:
                 updated = nil
                 resetsPagination = true
+                resetValue = resetValue.advanced()
             }
 
             publishMutation(updated)
@@ -783,7 +831,7 @@ private extension BucketPartition {
         await ContinuumLogContext.withOperation {
             continuumDebug(.invalidationReceived(logIdentity))
             do {
-                try await reset(including: .localSources)
+                try await reset()
             } catch is CancellationError {
                 return
             } catch {

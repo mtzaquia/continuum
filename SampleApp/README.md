@@ -9,7 +9,7 @@ experiment cards, state badges, and a live plain-language activity feed make it
 possible to follow each state transition while interacting with the library:
 
 - **Run the load pipeline** visualizes cache → remote → persistence and includes
-  controls for refreshes, failure injection, storage, and memory resets.
+  controls for refreshes, failure injection, storage, and persisted resets.
 - **Inspect the atomic snapshot** exposes established state, value count,
   mutations, errors, and cursor pagination together.
 - **Compare independent partitions** loads each shelf separately to show that

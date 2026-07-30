@@ -24,6 +24,12 @@ snapshot. If every local source returns `nil`, it falls through to
 Concurrent cached callers without memory receive the same result from one
 source flight.
 
+An in-memory bucket created with `Bucket(keySpace)` has no loading sources.
+Calling `load()` on it emits a runtime warning and, when no snapshot has been
+established by an in-memory mutation, throws
+`ContinuumError.missingRemoteSource(namespace:)`. Use `store`, `remove`, and
+`reset` for in-memory state instead.
+
 ## Publish cache before remote
 
 Use `.cachedThenRemote` when the repository should expose cached data as soon as

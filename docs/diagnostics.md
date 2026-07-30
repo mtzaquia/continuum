@@ -86,10 +86,11 @@ the `op:` identifier when investigating one operation.
 ## Account for release builds
 
 Optional diagnostic calls are compiled out of non-debug builds. Changing
-`Continuum.debug` in a release build is safe but emits no events. Continuum
-currently has no unconditional warning channel; existing errors, throws,
-preconditions, and observable failure state are unchanged by the diagnostic
-level.
+`Continuum.debug` in a release build is safe but emits no optional events.
+Loading a bucket with no local or remote source emits an unconditional warning
+identifying it as an in-memory bucket. The existing
+`ContinuumError.missingRemoteSource(namespace:)` error and observable failure
+state are otherwise unchanged by the diagnostic level.
 
 Next: [Loading snapshots](loading.md) ·
 [Persisting local snapshots](persistence.md) ·

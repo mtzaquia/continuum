@@ -99,7 +99,7 @@ struct ContentView: View {
                     icon: "arrow.counterclockwise",
                     tint: .orange
                 ) {
-                    catalog.resetCatalog()
+                    Task { await catalog.resetCatalog() }
                 }
                 .accessibilityIdentifier("catalog.reset")
             }
