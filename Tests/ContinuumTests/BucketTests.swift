@@ -209,6 +209,8 @@ struct BucketTests {
 
         #expect(buying === labels[.buy])
 
+        try await buying.store(Label(id: 1, text: "buy"))
+        _ = await buyingUpdates.next()
         try await buying.reset()
 
         guard case .reset? = await buyingUpdates.next() else {
@@ -216,6 +218,161 @@ struct BucketTests {
             return
         }
         #expect(selling.isLoaded == false)
+    }
+
+    @Test("Bucket updates combine any number of successful snapshots")
+    func combinedUpdates() async throws {
+        let count = Bucket(TestData.count)
+        let labels = Bucket(TestData.labels)
+        let subscriptions = Bucket(
+            TestData.subscription,
+            partitionedBy: Purpose.self
+        ) { _ in }
+        let subscription = subscriptions[.buy]
+        var updates = bucketUpdates(
+            observing: (count, labels, subscription),
+            transform: { count, labels, subscription in
+                "\(count):\(labels.count):\(subscription.plan)"
+            }
+        ).makeAsyncIterator()
+
+        try await count.store(2)
+        try await labels.store(Label(id: 1, text: "one"))
+        try await subscription.store(
+            Subscription(plan: "plus", runs: [])
+        )
+
+        guard case .result(.success(let value))? = await updates.next() else {
+            Issue.record("Expected the combined value")
+            return
+        }
+        #expect(value == "2:1:plus")
+
+        try await labels.reset()
+
+        guard case .reset? = await updates.next() else {
+            Issue.record("Expected the combined stream to reset")
+            return
+        }
+    }
+
+    @Test("Aggregate failures take precedence over unavailable sources")
+    func combinedUpdateFailurePrecedence() async {
+        let unavailable = TestUpdateSource<String>(.reset)
+        let failed = TestUpdateSource<Int>(
+            .result(.failure(TestError.failed))
+        )
+        var updates = bucketUpdates(
+            observing: (unavailable, failed),
+            transform: { _, _ in "unreachable" }
+        ).makeAsyncIterator()
+
+        guard case .result(.failure(let error))? = await updates.next() else {
+            Issue.record("Expected the dependency failure")
+            return
+        }
+        #expect(error is TestError)
+    }
+
+    @Test("Aggregate failures can preserve every dependency error")
+    func combinedUpdateFailureCollection() async {
+        let first = TestUpdateSource<Int>(
+            .result(.failure(DependencyError(id: 1)))
+        )
+        let unavailable = TestUpdateSource<String>(.reset)
+        let second = TestUpdateSource<Bool>(
+            .result(.failure(DependencyError(id: 2)))
+        )
+        var updates = bucketUpdates(
+            observing: (first, unavailable, second),
+            mapFailures: { errors in
+                CollectedDependencyErrors(
+                    ids: errors.compactMap {
+                        ($0 as? DependencyError)?.id
+                    }
+                )
+            },
+            transform: { _, _, _ in "unreachable" }
+        ).makeAsyncIterator()
+
+        guard case .result(.failure(let error))? = await updates.next(),
+              let collected = error as? CollectedDependencyErrors else {
+            Issue.record("Expected the collected dependency failures")
+            return
+        }
+        #expect(collected.ids == [1, 2])
+    }
+
+    @Test("A same-turn replacement skips aggregate reset")
+    func combinedUpdateReplacement() async {
+        let source = TestUpdateSource<Int>(.result(.success(1)))
+        var updates = bucketUpdates(
+            observing: source,
+            transform: { $0 }
+        ).makeAsyncIterator()
+        _ = await updates.next()
+
+        source.replace(2)
+
+        guard case .result(.success(let value))? = await updates.next() else {
+            Issue.record("Expected the replacement result")
+            return
+        }
+        #expect(value == 2)
+    }
+
+    @Test("Transform errors become aggregate failures")
+    func combinedUpdateTransformFailure() async {
+        let source = TestUpdateSource<Int>(.result(.success(1)))
+        var updates = bucketUpdates(
+            observing: source,
+            transform: { _ in throw TestError.failed }
+        ).makeAsyncIterator()
+
+        guard case .result(.failure(let error))? = await updates.next() else {
+            Issue.record("Expected the transform failure")
+            return
+        }
+        #expect(error is TestError)
+    }
+
+    @Test("A refresh does not republish the established snapshot")
+    func updatesIgnoreRefreshBookkeeping() async throws {
+        let gate = SnapshotGate<[Label]>()
+        let labels = Bucket(TestData.labels) {
+            RemoteSource {
+                await gate.load()
+            }
+        }
+
+        let initialLoad = Task {
+            try await labels.load(using: .remote)
+        }
+        await gate.waitForLoads(1)
+        await gate.complete(
+            load: 1,
+            with: [Label(id: 1, text: "before")]
+        )
+        _ = try await initialLoad.value
+
+        var updates = labels.updates().makeAsyncIterator()
+        _ = await updates.next()
+
+        let refresh = Task {
+            try await labels.load(using: .remote)
+        }
+        await gate.waitForLoads(2)
+        await gate.complete(
+            load: 2,
+            with: [Label(id: 2, text: "after")]
+        )
+        _ = try await refresh.value
+
+        guard case .result(.success(let snapshot))? = await updates.next() else {
+            Issue.record("Expected the refreshed snapshot")
+            return
+        }
+        #expect(snapshot.map(\.text) == ["after"])
     }
 
     @Test("A loaded empty partition does not load another partition")
@@ -1821,6 +1978,34 @@ struct BucketTests {
 
 private enum TestError: Error {
     case failed
+}
+
+private struct DependencyError: Error {
+    let id: Int
+}
+
+private struct CollectedDependencyErrors: Error {
+    let ids: [Int]
+}
+
+@Observable
+private final class TestUpdateSource<Snapshot: Sendable>:
+    BucketUpdateSource
+{
+    private var update: BucketUpdate<Snapshot>
+
+    init(_ update: BucketUpdate<Snapshot>) {
+        self.update = update
+    }
+
+    func _latestUpdateForObservation() -> BucketUpdate<Snapshot> {
+        update
+    }
+
+    func replace(_ snapshot: Snapshot) {
+        update = .reset
+        update = .result(.success(snapshot))
+    }
 }
 
 private actor Counter {

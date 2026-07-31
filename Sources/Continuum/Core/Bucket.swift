@@ -196,12 +196,19 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         storage.isEmpty
     }
 
+    internal var latestUpdate: BucketUpdate<Space.Snapshot> {
+        storage.latestUpdate
+    }
+
     /// Creates a sequence of snapshot results and reset transitions.
     ///
     /// Creating the sequence does not start a load. See
     /// ``BucketPartition/updates()`` for its delivery semantics.
     func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
-        storage.updates()
+        bucketUpdates(
+            observing: self,
+            transform: { (snapshot: Space.Snapshot) in snapshot }
+        )
     }
 
     /// Loads and atomically publishes the complete snapshot.

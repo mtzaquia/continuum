@@ -147,12 +147,24 @@ for await update in repository.posts.updates() {
 
 An established snapshot or current error is emitted immediately. Untouched and
 loading-without-data states remain silent; a successful empty snapshot is still
-emitted. A reset is emitted only while the bucket remains unavailable, so a
-replacement already available when observation resumes emits its result
-directly. Creating the sequence does not start a load.
+emitted. After a result, reset is emitted only while the bucket remains
+unavailable; initial and repeated unavailable states stay silent. A replacement
+already available when observation resumes emits its result directly. Creating
+the sequence does not start a load.
 
-That is the core idea: each repository owns one narrow atomic snapshot; use
-cases compose repository models when a feature needs a broader result.
+Use `bucketUpdates` when a use case needs several repository snapshots:
+
+```swift
+let rows = bucketUpdates(
+  observing: (postsRepository.posts, authorsRepository.authors)
+) { posts, authors in
+  makeRows(posts: posts, authors: authors)
+}
+```
+
+The tuple can contain any number of unpartitioned buckets and selected
+partitions. See [Repository composition](docs/repository-composition.md) for a
+complete use case and the result, failure, and reset contract.
 
 ## Local and remote sources
 

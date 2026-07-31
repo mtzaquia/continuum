@@ -113,6 +113,56 @@ Continuum handles each bucket's storage, loading state, source order, and
 coalescing. The use case owns cross-repository orchestration and presentation
 composition.
 
+## Observe composed display models
+
+Use `bucketUpdates` when the composed model should continue changing after its
+initial load:
+
+```swift
+struct ObserveFeed {
+  let postsRepository: PostsRepository
+  let authorsRepository: AuthorsRepository
+
+  func callAsFunction() -> AsyncStream<BucketUpdate<[FeedRow]>> {
+    bucketUpdates(
+      observing: (
+        postsRepository.posts,
+        authorsRepository.authors
+      )
+    ) { posts, authors in
+      let authorsByID = Dictionary(
+        uniqueKeysWithValues: authors.map { ($0.id, $0) }
+      )
+
+      return posts.compactMap { post in
+        guard let author = authorsByID[post.authorID] else {
+          return nil
+        }
+
+        return FeedRow(
+          postID: post.id,
+          title: post.title,
+          authorName: author.name
+        )
+      }
+    }
+  }
+}
+```
+
+The dependency tuple can contain any number of unpartitioned buckets and
+selected partitions. The transform runs only when every dependency has a
+successful snapshot; a successful empty snapshot is available data. Dependency
+failures take precedence over unavailable dependencies. By default, the first
+failure in tuple order is emitted; pass `mapFailures` to wrap every current
+dependency failure in a domain error. A thrown transform error is emitted
+directly.
+
+Initial and repeated unavailable states remain silent. After a result, an
+unavailable dependency emits one `.reset`; a replacement available before
+observation resumes emits its result directly. Creating the sequence does not
+load its dependencies, so the use case still controls when and how they load.
+
 ## Treat pagination as additive snapshot work
 
 The initial load establishes the atomic indexed snapshot. Pagination adds pages

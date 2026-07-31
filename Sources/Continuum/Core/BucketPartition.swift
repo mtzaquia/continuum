@@ -38,11 +38,6 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         case present(Space.Snapshot)
     }
 
-    private enum StreamPublication {
-        case result
-        case reset
-    }
-
     private enum LoadOrigin {
         case local
         case remote
@@ -132,10 +127,8 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private var storedSnapshot: StoredSnapshot = .absent
     private var loadState = LoadState()
     private var paginationState = PaginationState()
-    private var streamVersion: UInt = 0
 
-    @ObservationIgnored
-    private var resetStreamVersion: UInt?
+    private(set) var latestUpdate: BucketUpdate<Space.Snapshot> = .reset
 
     @ObservationIgnored
     private let localSources: [LocalSource<Space>]
@@ -332,83 +325,19 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     ///
     /// The sequence immediately emits an established snapshot or current error.
     /// An untouched or loading bucket without a snapshot remains silent, while
-    /// an established empty snapshot emits a successful empty value. Reset emits
-    /// ``BucketUpdate/reset`` only while the bucket remains unavailable; a
-    /// replacement available before observation resumes emits its result directly.
+    /// an established empty snapshot emits a successful empty value. After a
+    /// result, reset emits ``BucketUpdate/reset`` only while the bucket remains
+    /// unavailable; initial and repeated unavailable states remain silent. A
+    /// replacement available before observation resumes emits its result
+    /// directly.
     ///
     /// Creating the sequence does not start a load. Each call creates an
     /// independent observation that ends when iteration is cancelled.
     public func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
-        let baselineVersion = streamVersion
-
-        return AsyncStream(
-            bufferingPolicy: .unbounded
-        ) { continuation in
-            let producer = Task { @MainActor [weak self] in
-                guard let self else {
-                    continuation.finish()
-                    return
-                }
-
-                let (changes, changeContinuation) = AsyncStream<Void>.makeStream(
-                    bufferingPolicy: .bufferingNewest(1)
-                )
-                var changeIterator = changes.makeAsyncIterator()
-                var handledVersion = baselineVersion
-                var needsInitialEvaluation = true
-
-                defer {
-                    changeContinuation.finish()
-                    continuation.finish()
-                }
-
-                while Task.isCancelled == false {
-                    let version = withObservationTracking {
-                        self.streamVersion
-                    } onChange: {
-                        changeContinuation.yield()
-                    }
-
-                    guard needsInitialEvaluation
-                            || version != handledVersion else {
-                        guard await changeIterator.next() != nil else { return }
-                        continue
-                    }
-
-                    needsInitialEvaluation = false
-                    handledVersion = version
-
-                    if self.resetStreamVersion == version,
-                       self.currentStreamResult == nil {
-                        await Task.yield()
-                        guard self.streamVersion == version else {
-                            continue
-                        }
-                    }
-
-                    let update: BucketUpdate<Space.Snapshot>? =
-                        if let result = self.currentStreamResult {
-                            .result(result)
-                        } else if self.resetStreamVersion == version,
-                                  version != baselineVersion {
-                            .reset
-                        } else {
-                            nil
-                        }
-
-                    if let update,
-                       case .terminated = continuation.yield(update) {
-                        return
-                    }
-
-                    guard await changeIterator.next() != nil else { return }
-                }
-            }
-
-            continuation.onTermination = { @Sendable _ in
-                producer.cancel()
-            }
-        }
+        bucketUpdates(
+            observing: self,
+            transform: { (snapshot: Space.Snapshot) in snapshot }
+        )
     }
 
     /// Loads and atomically publishes the complete snapshot.
@@ -661,28 +590,15 @@ private extension BucketPartition {
         }
     }
 
-    var currentStreamResult: Result<Space.Snapshot, any Error>? {
-        if let error = loadState.error {
-            return .failure(error)
-        }
-        guard loadState.isLoaded, let snapshot else {
-            return nil
-        }
-        return .success(snapshot)
-    }
-
-    private func publishStreamState(
-        _ publication: StreamPublication = .result,
-        changes: () -> Void
-    ) {
+    private func publishStreamState(changes: () -> Void) {
         changes()
-        let version = streamVersion &+ 1
-
-        if case .reset = publication {
-            resetStreamVersion = version
+        latestUpdate = if let error = loadState.error {
+            .result(.failure(error))
+        } else if loadState.isLoaded, let snapshot {
+            .result(.success(snapshot))
+        } else {
+            .reset
         }
-
-        streamVersion = version
     }
 
     var currentOperationID: String {
@@ -802,7 +718,6 @@ private extension BucketPartition {
         let previousSnapshot = snapshot
         let previousPaginationCheckpoint = paginationCheckpoint
         let resetsPagination: Bool
-        let publishesReset: Bool
 
         do {
             let updated: Space.Snapshot?
@@ -816,22 +731,16 @@ private extension BucketPartition {
                     )
                 )
                 resetsPagination = false
-                publishesReset = false
             case .remove(let input):
                 updated = keySpace.removing(input, from: previousSnapshot)
                     .map(keySpace.normalized)
                 resetsPagination = false
-                publishesReset = previousSnapshot != nil && updated == nil
             case .reset:
                 updated = nil
                 resetsPagination = true
-                publishesReset = true
             }
 
-            publishMutation(
-                updated,
-                publication: publishesReset ? .reset : .result
-            )
+            publishMutation(updated)
             if resetsPagination {
                 clearPagination()
             }
@@ -905,11 +814,8 @@ private extension BucketPartition {
         }
     }
 
-    private func publishMutation(
-        _ snapshot: Space.Snapshot?,
-        publication: StreamPublication = .result
-    ) {
-        publishStreamState(publication) {
+    private func publishMutation(_ snapshot: Space.Snapshot?) {
+        publishStreamState {
             if let snapshot {
                 storedSnapshot = .present(snapshot)
                 loadState = LoadState(isLoaded: true)
