@@ -1,5 +1,9 @@
 # 🎞️ Continuum
 
+[![Tests](https://github.com/mtzaquia/continuum/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/mtzaquia/continuum/actions/workflows/tests.yml)
+[![Swift 6.3](https://img.shields.io/badge/Swift-6.3-orange.svg)](https://www.swift.org/)
+[![iOS 17+](https://img.shields.io/badge/iOS-17%2B-blue.svg)](https://github.com/mtzaquia/continuum/blob/main/Package.swift)
+
 `Continuum` is a typed, observable data-bucket library for Swift that keeps repository-owned snapshots coherent from cache to network.
 
 A key establishes the identity and complete snapshot owned by one narrow
