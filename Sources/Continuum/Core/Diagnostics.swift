@@ -503,7 +503,7 @@ nonisolated func continuumDebug(
         operationID: ContinuumLogContext.operationID
     )
     Logger(
-        subsystem: "eu.lelfe.Continuum",
+        subsystem: "eu.lelfe.continuum",
         category: event.category
     ).debug("\(message, privacy: .public)")
     #endif
@@ -517,7 +517,7 @@ nonisolated func continuumWarning(
         operationID: ContinuumLogContext.operationID
     )
     Logger(
-        subsystem: "eu.lelfe.Continuum",
+        subsystem: "eu.lelfe.continuum",
         category: event.category
     ).warning("\(message, privacy: .public)")
 }
