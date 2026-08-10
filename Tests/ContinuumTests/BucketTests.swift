@@ -2006,6 +2006,11 @@ private final class TestUpdateSource<Snapshot: Sendable>:
         update = .reset
         update = .result(.success(snapshot))
     }
+
+    // Work around the same Swift 6.3 EarlyPerfInliner crash as Bucket's
+    // explicit deinitializer when compiling this generic observable in Release.
+    @_optimize(none)
+    deinit {}
 }
 
 private actor Counter {

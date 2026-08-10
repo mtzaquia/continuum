@@ -122,9 +122,10 @@ public final class Bucket<
     }
 
     // Work around a Swift 6.3 EarlyPerfInliner crash in the synthesized
-    // deinitializer for this generic observable type.
+    // deinitializer for this generic observable type. This stays nonisolated
+    // because it performs no actor-isolated cleanup.
     @_optimize(none)
-    isolated deinit {}
+    deinit {}
 }
 
 public extension Bucket where Scope == UnpartitionedBucketScope {
