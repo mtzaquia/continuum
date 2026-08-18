@@ -58,6 +58,8 @@ public protocol BucketUpdateSource<Snapshot>: AnyObject {
 /// failure in tuple order is emitted. Use `mapFailures` to combine every current
 /// dependency failure into one error. The transform runs only when every source
 /// has a successful snapshot, and a thrown transform error is emitted directly.
+/// Creating the sequence is main actor-isolated because it begins observing
+/// bucket state. The returned updates can be consumed from any isolation domain.
 ///
 /// - Parameters:
 ///   - sources: The buckets and selected partitions the transform requires.
@@ -66,6 +68,7 @@ public protocol BucketUpdateSource<Snapshot>: AnyObject {
 ///   - transform: The value produced from the successful snapshots.
 /// - Returns: An independent update stream that ends when iteration is
 ///   cancelled.
+@MainActor
 public func bucketUpdates<
     each Source: BucketUpdateSource,
     Output: Sendable
@@ -120,6 +123,8 @@ public func bucketUpdates<
 /// snapshot.
 ///
 /// Delivery and failure behavior matches the tuple overload.
+/// Creating the sequence is main actor-isolated because it begins observing
+/// bucket state. The returned updates can be consumed from any isolation domain.
 ///
 /// - Parameters:
 ///   - source: The bucket or selected partition the transform requires.
@@ -127,6 +132,7 @@ public func bucketUpdates<
 ///   - transform: The value produced from the successful snapshot.
 /// - Returns: An independent update stream that ends when iteration is
 ///   cancelled.
+@MainActor
 public func bucketUpdates<
     Source: BucketUpdateSource,
     Output: Sendable

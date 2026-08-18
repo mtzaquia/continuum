@@ -4,10 +4,13 @@
 import PackageDescription
 
 let swiftSettings: [SwiftSetting] = [
-    .defaultIsolation(MainActor.self),
     .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
     .enableUpcomingFeature("InferIsolatedConformances"),
 ]
+
+let testSwiftSettings: [SwiftSetting] = [
+    .defaultIsolation(MainActor.self),
+] + swiftSettings
 
 let package = Package(
     name: "Continuum",
@@ -26,7 +29,7 @@ let package = Package(
         .testTarget(
             name: "ContinuumTests",
             dependencies: ["Continuum"],
-            swiftSettings: swiftSettings
+            swiftSettings: testSwiftSettings
         ),
     ],
     swiftLanguageModes: [.v6]

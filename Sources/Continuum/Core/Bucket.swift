@@ -45,6 +45,7 @@ import Observation
 /// ``BucketPartition`` owns independent values, loading state, and coalesced
 /// source work. Bucket state is main actor-isolated; source operations are
 /// asynchronous, sendable closures.
+@MainActor
 @Observable
 public final class Bucket<
     Space: ContinuumKeySpace,

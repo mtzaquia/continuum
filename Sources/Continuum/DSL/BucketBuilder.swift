@@ -60,7 +60,7 @@ public struct BucketConfiguration<Space: ContinuumKeySpace>: Sendable {
 /// builder. The bucket validates the accumulated remote-source count when it
 /// creates the corresponding atomic partition.
 @resultBuilder
-public enum BucketBuilder<Space: ContinuumKeySpace> {
+public enum BucketBuilder<Space: ContinuumKeySpace>: Sendable {
     /// Combines the building blocks declared at one configuration level.
     public static func buildBlock(
         _ components: BucketConfiguration<Space>...

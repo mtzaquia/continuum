@@ -31,6 +31,7 @@ import Observation
 /// The view is main actor-isolated. Source operations are asynchronous, and a
 /// successful snapshot is published to observation-tracked readers on the main
 /// actor.
+@MainActor
 @Observable
 public final class BucketPartition<Space: ContinuumKeySpace> {
     private enum StoredSnapshot {
