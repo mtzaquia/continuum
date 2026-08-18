@@ -53,10 +53,10 @@ public struct InvalidationSignal: Sendable {
     ///   observable memory and writable local snapshots. A sequence failure
     ///   becomes the bucket's observable error and ends this observation.
     public init<
-        Events: AsyncSequence & Sendable & SendableMetatype
+        Events: AsyncSequence & Sendable
     >(
         _ events: @escaping @Sendable () -> Events
-    ) where Events.AsyncIterator: SendableMetatype {
+    ) where Events.AsyncIterator: Sendable {
         observation = { invalidate, fail in
             do {
                 for try await _ in events() {
