@@ -41,7 +41,7 @@
 /// ```
 public struct InvalidationSignal: Sendable {
     let observation:
-        @Sendable (
+        @Sendable @concurrent (
             @escaping @MainActor @Sendable () async -> Void,
             @escaping @MainActor @Sendable (any Error) async -> Void
         ) async -> Void
@@ -56,7 +56,7 @@ public struct InvalidationSignal: Sendable {
         Events: AsyncSequence & Sendable
     >(
         _ events: @escaping @Sendable () -> Events
-    ) where Events.AsyncIterator: Sendable {
+    ) {
         observation = { invalidate, fail in
             do {
                 for try await _ in events() {
