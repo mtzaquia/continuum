@@ -30,8 +30,11 @@
 /// the same source a writable destination for normalized bucket snapshots.
 /// Writable local sources run in declaration order. Explicit mutations publish
 /// before persistence; a failure restores their prior snapshot. The first
-/// persistence error stops the sequence without rolling back destinations that
-/// already completed.
+/// persistence error stops the sequence. Remote loads and pages do not roll
+/// back completed destinations; explicit mutations attempt to restore them.
+/// Local reads and writes through the same partition are serialized across
+/// suspension points. Other users of the backing store need their own
+/// coordination.
 public struct LocalSource<Space: ContinuumKeySpace>: Sendable {
     let operation: @Sendable () async throws -> Space.Snapshot?
     let persistence:

@@ -14,9 +14,11 @@ let posts = try await repository.posts.load()
 
 An established memory snapshot returns immediately, even when a refresh is
 active. This keeps already published values inexpensive to request while
-`isLoading` continues to describe the refresh.
+`isLoading` continues to describe the refresh. A memory hit preserves any
+previous error; starting new source work clears it.
 
-Without memory, a cached load joins active source work. When no work exists, it
+Without memory, a cached load first waits for pending mutations and resets,
+then checks memory again and joins active source work. When no work exists, it
 tries `LocalSource` expressions in declaration order and returns the first
 snapshot. If every local source returns `nil`, it falls through to
 `RemoteSource`.
@@ -41,7 +43,8 @@ let remotePosts = try await repository.posts.load(
 )
 ```
 
-The policy proceeds in two observable phases:
+This policy waits for pending mutations and resets, then proceeds in two
+observable phases:
 
 1. It keeps established memory, or publishes the first successful local
    snapshot when memory is absent.
@@ -75,7 +78,8 @@ Use `.remote` when the current source request is obsolete:
 let refreshedPosts = try await repository.posts.load(using: .remote)
 ```
 
-A remote load requires `RemoteSource`, cancels active source work, skips memory
+A remote load requires `RemoteSource`, cancels active source work and queued or
+running mutations, skips memory
 and local sources, and immediately starts a new remote flight. Repeated remote
 calls are latest-wins rather than coalesced.
 
@@ -107,7 +111,12 @@ async let selling = repository.accounts[.sell].load(
 Forcing `.buy` supersedes only `.buy`. It does not cancel or change `.sell`.
 Different partitions can continue loading concurrently.
 
-Next: [Persisting local snapshots](persistence.md) ·
+When a retry clears a previous error, update streams reflect the retained
+snapshot, or unavailable state when no snapshot exists. Starting a refresh
+without an error does not duplicate the established result.
+
+Next: [Operation ordering](operation-ordering.md) ·
+[Persisting local snapshots](persistence.md) ·
 [Paginating buckets](pagination.md) ·
 [Partitioning buckets](partitioning.md) ·
 [Repository composition](repository-composition.md)

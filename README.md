@@ -67,7 +67,9 @@ enum PostsData {
 }
 ```
 
-Pass `indexedBy:` when the domain uses another stable identity.
+Pass `indexedBy:` when the domain uses another stable identity. Key-path
+arguments must be `Sendable`; see [Key-path migration](docs/operation-ordering.md#use-checked-key-paths)
+when upgrading code that stores key paths in explicitly typed variables.
 
 Create the observable data bucket inside the repository. The key supplied to
 `Bucket` gives every source its snapshot type:
@@ -75,6 +77,7 @@ Create the observable data bucket inside the repository. The key supplied to
 ```swift
 import Observation
 
+@MainActor
 @Observable
 final class PostsRepository {
   let posts: IndexedBucket<Post.ID, Post>
@@ -91,7 +94,9 @@ final class PostsRepository {
 }
 ```
 
-Bucket state is main actor-isolated. Source operations are `@Sendable`, so
+Repositories and use cases that synchronously access bucket state should be
+explicitly `@MainActor`; the examples do not require a project-wide default
+isolation setting. Source operations are `@Sendable`, so
 capture actors, sendable clients, or immutable values rather than mutable
 UI-owned objects.
 
@@ -392,8 +397,10 @@ partition behavior.
   independently loaded lists behind one typed key.
 - [Repository composition](docs/repository-composition.md) — keep repositories
   narrow and assemble display-ready models in use cases.
-- [Roadmap](docs/roadmap.md) — review the current decisions and remaining
-  storage-driver, lifecycle, extension, and release work.
+- [Operation ordering](docs/operation-ordering.md) — coordinate mutations,
+  refreshes, pagination, cancellation, and local persistence.
+- [Resource lifetime](docs/resource-lifetime.md) — manage partition ownership,
+  observation buffering, and indexed-snapshot costs.
 
 ## Current scope
 

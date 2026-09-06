@@ -177,8 +177,11 @@ through `nextPageError`.
 ## Coordinate page work
 
 Concurrent `loadNext()` calls for the same cursor share one source operation.
-Initial loads, refreshes, and continuation publication are serialized inside
-each selected partition.
+A continuation waits for pending store, remove, and reset operations before
+capturing the snapshot it will extend. A mutation started during page work
+supersedes that page. This prevents reconciliation or rollback from discarding
+a successfully published page. See [Operation ordering](operation-ordering.md)
+for the interactions with other loading policies.
 
 A remote load supersedes continuation work and replaces the merged snapshot
 with a new initial page. Generation checks prevent obsolete page values from
@@ -190,4 +193,4 @@ in-flight work.
 
 Next: [Loading snapshots](loading.md) ·
 [Mutating remote values](remote-mutations.md) ·
-[Partitioning buckets](partitioning.md) · [Roadmap](roadmap.md)
+[Partitioning buckets](partitioning.md) · [Resource lifetime](resource-lifetime.md)

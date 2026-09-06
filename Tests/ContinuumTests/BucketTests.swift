@@ -5,17 +5,17 @@ import Testing
 
 @Suite("Data buckets")
 struct BucketTests {
-    private struct Label: Equatable, Sendable {
+    nonisolated private struct Label: Equatable, Sendable {
         let id: Int
         let text: String
     }
 
-    private struct Run: Equatable, Sendable {
+    nonisolated private struct Run: Equatable, Sendable {
         let id: Int
         let status: String
     }
 
-    private struct Subscription: Equatable, Sendable {
+    nonisolated private struct Subscription: Equatable, Sendable {
         let plan: String
         var runs: [Run]
     }

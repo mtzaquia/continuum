@@ -36,8 +36,8 @@ public struct LoadState: Sendable {
 
     /// The latest snapshot-loading, mutation, persistence, or invalidation error.
     ///
-    /// Starting another load or mutation clears the previous error. A reset
-    /// clears it on success. Continuation failures are reported separately by
+    /// Starting source work or a mutation clears the previous error. A cached
+    /// memory hit preserves it. A reset clears it on success. Continuation failures are reported separately by
     /// ``PaginationState``.
     public let error: (any Error)?
 

@@ -58,6 +58,11 @@ public protocol BucketUpdateSource<Snapshot>: AnyObject {
 /// failure in tuple order is emitted. Use `mapFailures` to combine every current
 /// dependency failure into one error. The transform runs only when every source
 /// has a successful snapshot, and a thrown transform error is emitted directly.
+/// Each observation retains its sources until termination. Emitted updates
+/// have unbounded buffering; slow consumers can retain older snapshots. Changes
+/// before observation resumes may coalesce, so this is not a mutation log.
+/// Cancel iteration when the observation is no longer needed.
+///
 /// Creating the sequence is main actor-isolated because it begins observing
 /// bucket state. The returned updates can be consumed from any isolation domain.
 ///
@@ -123,6 +128,11 @@ public func bucketUpdates<
 /// snapshot.
 ///
 /// Delivery and failure behavior matches the tuple overload.
+/// Each observation retains its sources until termination. Emitted updates
+/// have unbounded buffering; slow consumers can retain older snapshots. Changes
+/// before observation resumes may coalesce, so this is not a mutation log.
+/// Cancel iteration when the observation is no longer needed.
+///
 /// Creating the sequence is main actor-isolated because it begins observing
 /// bucket state. The returned updates can be consumed from any isolation domain.
 ///

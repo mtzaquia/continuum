@@ -100,10 +100,22 @@ let posts = Bucket(PostsData.all) {
 }
 ```
 
-Continuum invokes writable destinations sequentially in declaration order. It
-stops at the first error and does not publish the candidate snapshot to memory.
-Destinations that completed earlier are not rolled back, so several independent
-stores do not form a cross-store transaction.
+Continuum invokes writable destinations sequentially in declaration order and
+stops at the first error. Remote loads and pages do not publish a failed
+candidate; their already completed destinations are not rolled back.
+
+Explicit store, remove, and reset operations have already published their
+candidate optimistically. If they still own the state, failure restores their
+previous memory snapshot and attempts to write it back to every destination,
+stopping again at the first error. The original failure remains the reported
+error. Independent destinations therefore do not form a cross-store
+transaction, and rollback itself can fail.
+
+Local reads and complete write sequences share one queue per partition. A reset
+waits for an already executing write to finish before clearing disk, even if
+that write ignores cancellation. Subsequent local reads wait behind the reset.
+This ordering applies to access through this partition; applications must
+coordinate writes from other buckets or direct storage users themselves.
 
 Concurrent explicit mutations are serialized. Each mutation derives its
 candidate from the last successfully published snapshot rather than racing

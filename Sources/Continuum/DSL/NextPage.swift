@@ -30,17 +30,6 @@ nonisolated public struct NextPage<
     Snapshot: Sendable,
     Cursor: Sendable
 >: Sendable {
-    // Key paths are immutable after construction. These wrappers permit the
-    // merge closure to carry them across isolation boundaries without exposing
-    // unchecked sendability through the public API.
-    private struct SendableKeyPath<Root, Value>: @unchecked Sendable {
-        let value: KeyPath<Root, Value>
-    }
-
-    private struct SendableWritableKeyPath<Root, Value>: @unchecked Sendable {
-        let value: WritableKeyPath<Root, Value>
-    }
-
     let operation:
         @Sendable (Cursor) async throws -> Page<Snapshot, Cursor>
     let merge: @Sendable (Snapshot, Snapshot) -> Snapshot
@@ -67,7 +56,9 @@ nonisolated public struct NextPage<
     /// Each incoming snapshot becomes the new base, so sibling properties use
     /// their latest remote values. Values at `collection` merge with the
     /// established collection in insertion order. Duplicate indices retain
-    /// their first position and use their latest value.
+    /// their first position and use their latest value. Both key paths must
+    /// be sendable, including any captured subscript arguments. Declare
+    /// value-only domain models `nonisolated` when using default actor isolation.
     ///
     /// - Parameters:
     ///   - collection: The nested collection that accumulates across pages.
@@ -75,20 +66,18 @@ nonisolated public struct NextPage<
     ///   - operation: An operation receiving the current cursor and returning
     ///     the next complete snapshot.
     public init<Element: Sendable, Index: Hashable & Sendable>(
-        accumulating collection: WritableKeyPath<Snapshot, [Element]>,
-        indexedBy index: KeyPath<Element, Index>,
+        accumulating collection: WritableKeyPath<Snapshot, [Element]> & Sendable,
+        indexedBy index: KeyPath<Element, Index> & Sendable,
         _ operation: @escaping @Sendable (Cursor) async throws
             -> Page<Snapshot, Cursor>
     ) {
-        let collection = SendableWritableKeyPath(value: collection)
-        let index = SendableKeyPath(value: index)
         self.operation = operation
         merge = { current, incoming in
             var result = incoming
-            result[keyPath: collection.value] = mergedValues(
-                current[keyPath: collection.value],
-                incoming[keyPath: collection.value],
-                indexedBy: index.value
+            result[keyPath: collection] = mergedValues(
+                current[keyPath: collection],
+                incoming[keyPath: collection],
+                indexedBy: index
             )
             return result
         }

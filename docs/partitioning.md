@@ -33,6 +33,7 @@ nonisolated enum Purpose: Hashable, Sendable {
   case sell
 }
 
+@MainActor
 @Observable
 final class AccountsRepository {
   let accounts: PartitionedIndexedBucket<
@@ -124,4 +125,4 @@ cached list remains captured by the repository's dependencies rather than
 becoming part of the partition value.
 
 Next: [Loading snapshots](loading.md) · [Paginating buckets](pagination.md) ·
-[Repository composition](repository-composition.md) · [Roadmap](roadmap.md)
+[Repository composition](repository-composition.md) · [Resource lifetime](resource-lifetime.md)

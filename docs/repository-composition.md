@@ -24,6 +24,7 @@ enum PostsData {
   static let all = IndexedKey<Post.ID, Post>("posts")
 }
 
+@MainActor
 @Observable
 final class PostsRepository {
   let posts: IndexedBucket<Post.ID, Post>
@@ -57,6 +58,7 @@ enum AuthorsData {
   static let all = IndexedKey<Author.ID, Author>("authors")
 }
 
+@MainActor
 @Observable
 final class AuthorsRepository {
   let authors: IndexedBucket<Author.ID, Author>
@@ -79,12 +81,13 @@ A use case coordinates the repositories needed for one workflow and returns the
 model that workflow should display:
 
 ```swift
-struct FeedRow: Sendable {
+nonisolated struct FeedRow: Sendable {
   let postID: Post.ID
   let title: String
   let authorName: String
 }
 
+@MainActor
 struct LoadFeed {
   let postsRepository: PostsRepository
   let authorsRepository: AuthorsRepository
@@ -119,6 +122,7 @@ Use `bucketUpdates` when the composed model should continue changing after its
 initial load:
 
 ```swift
+@MainActor
 struct ObserveFeed {
   let postsRepository: PostsRepository
   let authorsRepository: AuthorsRepository
@@ -192,4 +196,4 @@ The application composes repositories into use cases at its dependency
 boundary. Continuum does not require repositories to share a parent store or
 produce presentation-specific joined models.
 
-Next: [Partitioning buckets](partitioning.md) · [Roadmap](roadmap.md)
+Next: [Partitioning buckets](partitioning.md) · [Resource lifetime](resource-lifetime.md)

@@ -149,8 +149,8 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
 
     /// The latest snapshot-loading, mutation, persistence, or invalidation error.
     ///
-    /// Starting another load or mutation clears the previous error. A reset
-    /// clears it on success. Continuation failures appear in
+    /// Starting source work or a mutation clears the previous error. A cached
+    /// memory hit preserves it. A reset clears it on success. Continuation failures appear in
     /// ``nextPageError`` instead.
     var error: (any Error)? {
         storage.error
@@ -220,7 +220,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// cached-then-remote load publishes available cache data and returns after
     /// its required remote phase. A remote load supersedes active work and starts
     /// directly at the remote source. Before a remote result enters memory,
-    /// writable local sources persist it in declaration order.
+    /// writable local sources persist it in declaration order. A remote load
+    /// also supersedes pending mutations. Cached-then-remote loads, and cached
+    /// loads without memory, wait for pending mutations and resets.
     /// Loading a bucket with no local or remote source emits a runtime warning;
     /// such a bucket is intended to be used as an in-memory bucket.
     ///
@@ -248,7 +250,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// - Parameter value: The value to insert or replace.
     /// - Throws: An error raised by ``Store`` or a writable ``LocalSource``.
     ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence.
+    ///   observable memory and attempts to restore local persistence. Caller
+    ///   cancellation also restores state if no newer operation owns it, but
+    ///   does not become the bucket's error.
     func store(_ value: Space.Value) async throws {
         try await storage.store(value)
     }
@@ -264,7 +268,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// - Parameter input: The value to remove.
     /// - Throws: An error raised by ``Remove`` or a writable ``LocalSource``.
     ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence.
+    ///   observable memory and attempts to restore local persistence. Caller
+    ///   cancellation also restores state if no newer operation owns it, but
+    ///   does not become the bucket's error.
     func remove(_ input: Space.Input) async throws {
         try await storage.remove(input)
     }
@@ -275,8 +281,10 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
     /// Observable memory resets before writable local sources receive `nil` in
-    /// declaration order. A failure restores the previous observable state,
-    /// attempts to restore local persistence, and becomes ``error``.
+    /// declaration order, after already executing local writes finish. A
+    /// failure restores the previous observable state, attempts to restore
+    /// local persistence, and becomes ``error``. Caller cancellation restores
+    /// state only while this reset still owns it and does not become ``error``.
     ///
     /// - Throws: An error raised by a writable ``LocalSource``.
     func reset() async throws {
@@ -364,7 +372,9 @@ where Scope == UnpartitionedBucketScope
 
     /// Loads and merges the next remote page.
     ///
-    /// Concurrent calls for the same cursor share one source operation.
+    /// Concurrent calls for the same cursor share one source operation. Page
+    /// work waits for pending mutations and resets before capturing its base
+    /// snapshot; a later mutation supersedes an active page.
     /// Array pages append using the key's ordered-index semantics. A
     /// ``NextPage`` with nested accumulation uses the incoming snapshot as its
     /// base and accumulates only the selected collection. When the latest page
@@ -391,7 +401,9 @@ public extension Bucket where Scope: PartitionedBucketScope {
     ///
     /// The first access creates the partition lazily. Later accesses with an
     /// equal value return the same partition and preserve its snapshot, state,
-    /// and in-flight work.
+    /// and in-flight work. Accessed partitions remain retained until this
+    /// bucket is released; reset clears a partition's data without evicting it.
+    /// Use bounded query identities for long-lived buckets.
     ///
     /// - Parameter partition: The stable identity of the list to select.
     subscript(partition: Scope.Partition) -> BucketPartition<Space> {

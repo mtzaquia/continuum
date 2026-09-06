@@ -15,7 +15,7 @@ struct KeyTests {
 
     @Test("Indexed keys retain their typed index and value contract")
     func indexedIdentity() {
-        struct Post: Sendable {
+        nonisolated struct Post: Sendable {
             let id: Int
         }
 

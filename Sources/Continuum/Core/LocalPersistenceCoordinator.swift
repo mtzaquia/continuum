@@ -23,9 +23,14 @@
 private typealias PersistenceOperation<Space: ContinuumKeySpace> =
     @Sendable (Space.Snapshot?) async throws -> Void
 
-actor LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
+/// Reserves local reads and writes in bucket-call order. The task chain, rather
+/// than actor isolation alone, keeps suspended source operations serialized.
+@MainActor
+final class LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
     private let operations: [PersistenceOperation<Space>]
     private let logIdentity: BucketLogIdentity
+    private var tail: Task<Void, Never>?
+    private var identifier: UInt = 0
 
     init(
         sources: [LocalSource<Space>],
@@ -35,28 +40,61 @@ actor LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
         self.logIdentity = logIdentity
     }
 
-    func persist(_ snapshot: Space.Snapshot?) async throws {
-        guard operations.isEmpty == false else {
+    func persist(
+        _ snapshot: Space.Snapshot?,
+        restoring: Bool = false
+    ) async throws {
+        let operations = operations
+        let logIdentity = logIdentity
+        try await enqueue(ignoringCancellation: restoring) {
+            guard operations.isEmpty == false else { return }
+            continuumDebug(
+                .persistenceStarted(logIdentity, destinations: operations.count)
+            )
+            for operation in operations {
+                try Task.checkCancellation()
+                try await operation(snapshot)
+            }
             try Task.checkCancellation()
-            return
+            continuumDebug(
+                .persistenceCompleted(logIdentity, destinations: operations.count)
+            )
         }
+    }
 
-        continuumDebug(
-            .persistenceStarted(
-                logIdentity,
-                destinations: operations.count
-            )
-        )
-        for operation in operations {
+    func read(
+        _ operation: @escaping @Sendable () async throws -> Space.Snapshot?
+    ) async throws -> Space.Snapshot? {
+        try await enqueue(operation: operation)
+    }
+
+    private func enqueue<Value: Sendable>(
+        ignoringCancellation: Bool = false,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let predecessor = tail
+        identifier &+= 1
+        let identifier = identifier
+        // Local I/O has no main-actor work. Queue registration above is atomic
+        // with bucket publication; the source closures execute off this actor.
+        let task = Task { @concurrent in
+            if let predecessor { await predecessor.value }
             try Task.checkCancellation()
-            try await operation(snapshot)
+            return try await operation()
         }
-        try Task.checkCancellation()
-        continuumDebug(
-            .persistenceCompleted(
-                logIdentity,
-                destinations: operations.count
-            )
-        )
+        tail = Task { @concurrent in
+            _ = await task.result
+        }
+        defer {
+            if self.identifier == identifier { tail = nil }
+        }
+        // Rollback must remain able to restore disk after caller cancellation.
+        // It is still ordered before every subsequently submitted operation.
+        if ignoringCancellation { return try await task.value }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 }

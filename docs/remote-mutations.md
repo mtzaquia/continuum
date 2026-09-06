@@ -111,8 +111,16 @@ and `error`. A remote system can still have applied a request that fails
 ambiguously, so this is UI and local-state rollback rather than a distributed
 transaction.
 
-Concurrent explicit mutations are serialized across the complete pipeline.
-`reset()` does not invoke remote mutation capabilities.
+Concurrent stores and removes are serialized across the complete pipeline.
+Reset supersedes queued and running mutations, and does not invoke remote
+mutation capabilities. A forced `.remote` load also supersedes mutations;
+`.cachedThenRemote` and `loadNext()` wait for them.
+
+Caller cancellation restores memory and attempts to restore local persistence
+when the mutation still owns the state. Cleanup finishes before its throwing
+call completes, and cancellation does not become the bucket's `error`.
+Superseded mutations cannot roll back their replacement. See
+[Operation ordering](operation-ordering.md) for the complete policy.
 
 ## Combine mutations with pagination
 

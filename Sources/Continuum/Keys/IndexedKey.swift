@@ -37,10 +37,6 @@ nonisolated public struct IndexedKey<
     Index: Hashable & Sendable,
     Value: Sendable
 >: ContinuumKeySpace {
-    private struct SendableKeyPath<Root, Result>: @unchecked Sendable {
-        let value: KeyPath<Root, Result>
-    }
-
     /// The index type that selects one value.
     public typealias Input = Index
 
@@ -100,7 +96,11 @@ nonisolated public struct IndexedKey<
         self.indexOperation = indexOperation
     }
 
-    /// Creates a typed indexed key using a key path.
+    /// Creates a typed indexed key using a sendable key path.
+    ///
+    /// Declare value-only models `nonisolated` in targets with default actor
+    /// isolation. Explicitly typed key-path variables must retain `& Sendable`;
+    /// paths capturing non-sendable subscript arguments are not supported.
     ///
     /// The namespace must not be empty, and the version must be greater than
     /// zero.
@@ -113,14 +113,13 @@ nonisolated public struct IndexedKey<
     public init(
         _ namespace: String,
         version: Int = 1,
-        indexedBy keyPath: KeyPath<Value, Index>
+        indexedBy keyPath: KeyPath<Value, Index> & Sendable
     ) {
-        let keyPath = SendableKeyPath(value: keyPath)
         self.init(
             namespace,
             version: version,
             indexedBy: { value in
-                value[keyPath: keyPath.value]
+                value[keyPath: keyPath]
             }
         )
     }

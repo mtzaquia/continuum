@@ -27,7 +27,7 @@ public enum LoadPolicy: Sendable {
     ///
     /// An established memory snapshot returns immediately, including while
     /// refresh work is active. Without memory, concurrent cached loads share
-    /// the same source work.
+    /// the same source work after pending mutations and resets complete.
     case cached
 
     /// Publishes a cached snapshot when available, then always loads and
@@ -35,12 +35,13 @@ public enum LoadPolicy: Sendable {
     ///
     /// This policy returns after the remote phase completes. It requires a
     /// ``RemoteSource`` even when memory or a local source can provide a
-    /// snapshot.
+    /// snapshot. Pending mutations and resets complete before this load starts.
     case cachedThenRemote
 
     /// Supersedes active source work and loads directly from the remote source.
     ///
-    /// This policy requires a ``RemoteSource``.
+    /// This policy requires a ``RemoteSource`` and also supersedes queued and
+    /// running mutations. Obsolete mutations cannot publish or roll back state.
     /// Repeated remote loads use latest-wins behavior. Results and errors from
     /// superseded source work cannot replace the current snapshot or state.
     case remote
