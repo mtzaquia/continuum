@@ -129,7 +129,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private var loadState = LoadState()
     private var paginationState = PaginationState()
 
-    private(set) var latestUpdate: BucketUpdate<Space.Snapshot> = .reset
+    private(set) var latestUpdate: Update<Space.Snapshot> = .reset
 
     @ObservationIgnored
     private let localSources: [LocalSource<Space>]
@@ -322,12 +322,18 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         values.isEmpty
     }
 
+    /// The current observable result or reset, initially `.reset`.
+    ///
+    /// Loading alone does not clear the outcome. Failures are represented in
+    /// the result; this property does not retain a separate successful value.
+    public var latest: Update<Space.Snapshot> { latestUpdate }
+
     /// Creates a sequence of snapshot results and reset transitions.
     ///
     /// The sequence immediately emits an established snapshot or current error.
     /// An untouched or loading bucket without a snapshot remains silent, while
     /// an established empty snapshot emits a successful empty value. After a
-    /// result, reset emits ``BucketUpdate/reset`` only while the bucket remains
+    /// result, reset emits ``Update/reset`` only while the bucket remains
     /// unavailable; initial and repeated unavailable states remain silent. A
     /// replacement available before observation resumes emits its result
     /// directly.
@@ -337,11 +343,9 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// observation retains its source until termination. Emitted updates use
     /// an unbounded buffer; slow consumers can retain older snapshots. State
     /// changes before observation resumes may be coalesced.
-    public func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
-        bucketUpdates(
-            observing: self,
-            transform: { (snapshot: Space.Snapshot) in snapshot }
-        )
+    @available(*, deprecated, message: "Iterate the bucket or selected partition directly instead of calling updates().")
+    public func updates() -> AsyncStream<Update<Space.Snapshot>> {
+        makeSourceObservation(self).stream
     }
 
     /// Loads and atomically publishes the complete snapshot.
@@ -1630,5 +1634,38 @@ private extension BucketPartition {
             hasNextPage: paginationCheckpoint.continuation != nil,
             error: error
         )
+    }
+}
+
+
+extension BucketPartition: AsyncSequence {
+    /// The result or reset emitted by this partition.
+    public typealias Element = Update<Space.Snapshot>
+
+    /// Observes outcomes without starting a load.
+    ///
+    /// Initial unavailability is silent. Each iterator has an independent,
+    /// unbounded buffer and retains the partition until cancelled or released.
+    /// Changes may coalesce, matching ``updates()``.
+    nonisolated public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(observation: makeSourceObservation(self))
+    }
+
+    /// An independent subscription to a bucket or selected partition.
+    nonisolated public struct AsyncIterator: AsyncIteratorProtocol {
+        private var iterator: AsyncStream<Element>.Iterator
+        private let lifetime: BucketObservationLifetime
+
+        nonisolated init(
+            observation: (stream: AsyncStream<Element>, cancel: @Sendable () -> Void)
+        ) {
+            iterator = observation.stream.makeAsyncIterator()
+            lifetime = BucketObservationLifetime(observation.cancel)
+        }
+
+        /// Waits for an outcome, returning nil after cancellation.
+        @concurrent public mutating func next() async -> Element? {
+            await iterator.next()
+        }
     }
 }

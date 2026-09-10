@@ -8,23 +8,30 @@ from every writable local source:
 try await posts.reset()
 ```
 
-For source compatibility, a deprecated synchronous `reset()` overload remains.
-It schedules the same reset in a `Task` but cannot report persistence errors;
-new callers should use the async form above.
-
 Continuum resets memory and pagination state immediately, then sends `nil` to
 each writable `LocalSource` sequentially in declaration order. It stops at the
 first error. A failure restores the previous observable snapshot and pagination
 checkpoint, attempts to restore local persistence, appears as `error`, and
 causes the call to throw.
 
-An active `updates()` sequence emits `.reset` while the bucket remains
-unavailable. If replacement data is already available when observation resumes,
+An active bucket iterator emits `.reset` while the bucket remains unavailable. If replacement data is already available when observation resumes,
 it emits that result directly. A failed reset emits its failure after state is
 restored.
 
-The parameterized `reset(including:)` overload is deprecated and forwards to
-`reset()`.
+## Invalidate a composition input
+
+A required bucket reset clears a composition's previously published outcome.
+An optional bucket reset contributes nil and allows the transform to run when
+all required inputs are available. If another required input is failing, the
+composition emits reset before failure so a consumer can clear invalid retained
+data before displaying the error.
+
+Other inputs keep their state: external streams continue listening, observable
+expressions remain observed, and unrelated buckets are unchanged. A reset does
+not call loading actions or restart stream subscriptions. Required data becoming
+available again lets the composition recover using the latest inputs. See
+[Composition outcomes and resets](composition.md#observe-outcomes-and-resets)
+for the full contract, including nested compositions.
 
 ## Observe application events
 

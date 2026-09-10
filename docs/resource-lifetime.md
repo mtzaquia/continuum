@@ -22,10 +22,21 @@ sources until termination.
 
 ## Cancel observation tasks
 
-Each `updates()` or `bucketUpdates` call creates independent observation work.
-Cancel the task iterating the stream when its consumer is no longer needed.
-If the stream is retained, simply breaking out of a loop does not explicitly
-cancel that observation.
+Direct bucket and partition iterators create independent observations. Cancelling
+or releasing an iterator ends its observation and releases the retained source.
+Composition iterators subscribe independently to one shared observable outcome;
+the composition keeps observing for its own lifetime.
+
+Sequence inputs belong to their composition, not to any one consumer. Releasing
+one consumer does not stop the other consumers or upstream subscriptions.
+Releasing the composition cancels upstream iteration; cancellation remains
+cooperative for external sequences. Restarting a sequence input cancels its
+previous iterator and prevents its late results from replacing current state.
+
+Each composition materializes its own sequence inputs. Reusing one `Input`
+declaration in two compositions creates two subscriptions. The factory must
+provide a usable sequence each time; returning the same single-consumer stream
+does not turn it into a broadcast source.
 
 Emitted updates use an unbounded buffer. A consumer that processes results more
 slowly than observation emits them retains older snapshots. This preserves
@@ -35,7 +46,8 @@ buffering would change that delivery contract.
 Observation may coalesce changes made before it resumes. These streams are
 current-state observation, not a durable log of every mutation. Starting a
 retry clears the old failure and exposes either retained data or unavailable
-state; ordinary loading bookkeeping does not duplicate a successful result.
+state; ordinary bucket loading bookkeeping does not duplicate a successful
+result. Compositions may emit repeated equal results after explicit loads.
 
 ## Measure indexed snapshots
 
@@ -45,26 +57,9 @@ also normalize input, and the bucket normalizes their output to support custom
 key spaces. These operations can matter for large snapshots or repeated lookup
 inside rendering loops.
 
-Run the standalone Release benchmark described in
-[Validation](../Validation/README.md) before choosing a different storage
-representation. It measures lookup and the complete key-level mutation plus
-normalization pipeline at several collection sizes. The benchmark does not
-include network latency, persistence, or UI rendering.
-
-A local Apple Silicon baseline on 6 September 2026 using Swift 6.3.3 produced
-these median totals (milliseconds):
-
-| Rows | 2,000 lookups | 100 stores plus normalization |
-| --- | ---: | ---: |
-| 100 | 14.23 | 7.74 |
-| 1,000 | 129.74 | 68.72 |
-| 10,000 | 1,306.83 | 654.98 |
-
-These are measurements of this fixture, not latency promises for applications.
-They support measuring repeated indexed access in large collections before
-choosing an auxiliary index. No auxiliary index or changed normalization
-contract is introduced by these correctness fixes. Use measurements from representative workloads to justify
-that additional state and its invalidation rules.
+Profile representative snapshots in a Release build before adding auxiliary
+indexes or caches. Include mutation and normalization costs as well as lookup
+time, and account for snapshots retained by slow asynchronous consumers.
 
 Next: [Partitioning buckets](partitioning.md) ·
-[Repository composition](repository-composition.md)
+[Live compositions](composition.md)

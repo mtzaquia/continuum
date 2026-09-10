@@ -75,6 +75,7 @@ try await buying.load()
 
 buying.isLoaded
 buying.values
+buying.latest
 buying[accountID]
 
 try await buying.store(account)
@@ -105,6 +106,29 @@ active `.buy` work without cancelling `.sell`; see
 The outer bucket intentionally has no aggregate `isLoaded` or `values`.
 Completeness is meaningful only for a selected partition.
 
+## Observe and compose selected partitions
+
+A selected partition exposes `latest: Update<Snapshot>` and can be iterated
+directly, with the same result/reset cases as a bucket or composition:
+
+```swift
+for await update in repository.accounts[.buy] {
+  // Handle the current result or a reset.
+}
+
+let comparison = Composition {
+  Input(repository.accounts[.buy])
+  Input(repository.accounts[.sell]).optional()
+} transform: { buying, selling in
+  buying.count + (selling?.count ?? 0)
+}
+```
+
+The outer partitioned bucket has no single `latest` outcome or async sequence;
+select the partitions that belong in the composition. These inputs observe
+without loading. Attach loading actions when the composition should request
+loads. See [Live compositions](composition.md) for required and optional inputs.
+
 ## Keep partitioning flat
 
 The initializer accepts one partition type, so a bucket has exactly one flat
@@ -125,4 +149,4 @@ cached list remains captured by the repository's dependencies rather than
 becoming part of the partition value.
 
 Next: [Loading snapshots](loading.md) · [Paginating buckets](pagination.md) ·
-[Repository composition](repository-composition.md) · [Resource lifetime](resource-lifetime.md)
+[Live compositions](composition.md) · [Resource lifetime](resource-lifetime.md)

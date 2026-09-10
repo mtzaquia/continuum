@@ -22,7 +22,8 @@
 
 import Observation
 
-/// A coherent result or unavailable state published by a bucket.
+/// A coherent result or unavailable state published by a bucket or composition.
+@available(*, deprecated, renamed: "Update")
 nonisolated public enum BucketUpdate<Snapshot: Sendable>: Sendable {
     /// The bucket established a snapshot or reported an error.
     case result(Result<Snapshot, any Error>)
@@ -31,19 +32,20 @@ nonisolated public enum BucketUpdate<Snapshot: Sendable>: Sendable {
     case reset
 }
 
-/// A bucket or selected partition that can participate in aggregate updates.
+/// A bucket, selected partition, or composition that can participate in aggregate updates.
 ///
-/// Continuum provides conformances for ``Bucket`` and ``BucketPartition``.
+/// Continuum provides conformances for ``Bucket``, ``BucketPartition``, and
+/// ``Composition``.
+@available(*, deprecated, renamed: "UpdateSource")
 @MainActor
 public protocol BucketUpdateSource<Snapshot>: AnyObject {
     associatedtype Snapshot: Sendable
 
     /// Returns the source's coherent state for aggregate observation.
     ///
-    /// Consume ``Bucket/updates()`` or use
-    /// ``bucketUpdates(observing:transform:)`` instead of calling this
-    /// infrastructure method directly.
-    func _latestUpdateForObservation() -> BucketUpdate<Snapshot>
+    /// Iterate the source or use `Input(source)` in a ``Composition`` instead
+    /// of calling this infrastructure method directly.
+    func _latestUpdateForObservation() -> Update<Snapshot>
 }
 
 /// Observes buckets and transforms their successful snapshots.
@@ -73,16 +75,17 @@ public protocol BucketUpdateSource<Snapshot>: AnyObject {
 ///   - transform: The value produced from the successful snapshots.
 /// - Returns: An independent update stream that ends when iteration is
 ///   cancelled.
+@available(*, deprecated, message: "Use Composition { Input(source) } transform: { ... } instead.")
 @MainActor
 public func bucketUpdates<
-    each Source: BucketUpdateSource,
+    each Source: UpdateSource,
     Output: Sendable
 >(
     observing sources: (repeat each Source),
     mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
     transform: @escaping @MainActor
         (repeat (each Source).Snapshot) throws -> Output
-) -> AsyncStream<BucketUpdate<Output>> {
+) -> AsyncStream<Update<Output>> {
     makeBucketUpdates { id, changes in
         let updates = withObservationTracking {
             (repeat (each sources)._latestUpdateForObservation())
@@ -142,15 +145,16 @@ public func bucketUpdates<
 ///   - transform: The value produced from the successful snapshot.
 /// - Returns: An independent update stream that ends when iteration is
 ///   cancelled.
+@available(*, deprecated, message: "Use Composition { Input(source) } transform: { ... } instead.")
 @MainActor
 public func bucketUpdates<
-    Source: BucketUpdateSource,
+    Source: UpdateSource,
     Output: Sendable
 >(
     observing source: Source,
     mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
     transform: @escaping @MainActor (Source.Snapshot) throws -> Output
-) -> AsyncStream<BucketUpdate<Output>> {
+) -> AsyncStream<Update<Output>> {
     makeBucketUpdates { id, changes in
         let update = withObservationTracking {
             source._latestUpdateForObservation()
@@ -177,9 +181,18 @@ private func makeBucketUpdates<Output: Sendable>(
     evaluate: @escaping @MainActor (
         _ id: UInt,
         _ changes: AsyncStream<UInt>.Continuation
-    ) -> BucketUpdate<Output>
-) -> AsyncStream<BucketUpdate<Output>> {
-    let (stream, continuation) = AsyncStream<BucketUpdate<Output>>.makeStream(
+    ) -> Update<Output>
+) -> AsyncStream<Update<Output>> {
+    makeBucketObservation(evaluate: evaluate).stream
+}
+
+func makeBucketObservation<Output: Sendable>(
+    evaluate: @escaping @MainActor (
+        _ id: UInt,
+        _ changes: AsyncStream<UInt>.Continuation
+    ) -> Update<Output>
+) -> (stream: AsyncStream<Update<Output>>, cancel: @Sendable () -> Void) {
+    let (stream, continuation) = AsyncStream<Update<Output>>.makeStream(
         bufferingPolicy: .unbounded
     )
     let producer = Task { @MainActor in
@@ -235,27 +248,54 @@ private func makeBucketUpdates<Output: Sendable>(
     continuation.onTermination = { @Sendable _ in
         producer.cancel()
     }
-    return stream
+    return (stream, {
+        continuation.finish()
+        producer.cancel()
+    })
 }
 
-extension Bucket: BucketUpdateSource
+extension Bucket: UpdateSource
 where Scope == UnpartitionedBucketScope {
-    public func _latestUpdateForObservation() -> BucketUpdate<Space.Snapshot> {
+    public func _latestUpdateForObservation() -> Update<Space.Snapshot> {
         latestUpdate
     }
 }
 
-extension BucketPartition: BucketUpdateSource {
-    public func _latestUpdateForObservation() -> BucketUpdate<Space.Snapshot> {
+extension BucketPartition: UpdateSource {
+    public func _latestUpdateForObservation() -> Update<Space.Snapshot> {
         latestUpdate
     }
 }
 
 nonisolated private func successfulSnapshot<Snapshot: Sendable>(
-    from update: BucketUpdate<Snapshot>
+    from update: Update<Snapshot>
 ) -> Snapshot {
     guard case .result(.success(let snapshot)) = update else {
         preconditionFailure("Bucket updates must be successful before unwrapping")
     }
     return snapshot
 }
+
+
+func makeSourceObservation<Source: UpdateSource & Sendable>(
+    _ source: Source
+) -> (stream: AsyncStream<Update<Source.Snapshot>>, cancel: @Sendable () -> Void) {
+    makeBucketObservation { id, changes in
+        withObservationTracking {
+            source._latestUpdateForObservation()
+        } onChange: {
+            changes.yield(id)
+        }
+    }
+}
+
+
+/// A result or reset shared by buckets, partitions, and compositions.
+///
+/// This alias preserves the original nominal type for API compatibility.
+public typealias Update<Value: Sendable> = BucketUpdate<Value>
+
+/// A source whose outcomes can participate in a composition.
+///
+/// This alias preserves existing custom source conformances.
+public typealias UpdateSource = BucketUpdateSource

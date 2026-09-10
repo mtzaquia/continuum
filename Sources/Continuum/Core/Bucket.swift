@@ -198,7 +198,13 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         storage.isEmpty
     }
 
-    internal var latestUpdate: BucketUpdate<Space.Snapshot> {
+    /// The current observable result or reset, initially `.reset`.
+    ///
+    /// Loading alone does not clear the outcome. Failures are represented in
+    /// the result; this property does not retain a separate successful value.
+    var latest: Update<Space.Snapshot> { storage.latestUpdate }
+
+    internal var latestUpdate: Update<Space.Snapshot> {
         storage.latestUpdate
     }
 
@@ -206,11 +212,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     ///
     /// Creating the sequence does not start a load. See
     /// ``BucketPartition/updates()`` for its delivery semantics.
-    func updates() -> AsyncStream<BucketUpdate<Space.Snapshot>> {
-        bucketUpdates(
-            observing: self,
-            transform: { (snapshot: Space.Snapshot) in snapshot }
-        )
+    @available(*, deprecated, message: "Iterate the bucket or selected partition directly instead of calling updates().")
+    func updates() -> AsyncStream<Update<Space.Snapshot>> {
+        makeSourceObservation(self).stream
     }
 
     /// Loads and atomically publishes the complete snapshot.
@@ -430,5 +434,21 @@ private extension Bucket where Scope == UnpartitionedBucketScope {
             preconditionFailure("An unpartitioned bucket requires atomic storage.")
         }
         return unpartitioned
+    }
+}
+
+
+extension Bucket: AsyncSequence where Scope == UnpartitionedBucketScope {
+    /// The result or reset emitted by this bucket.
+    public typealias Element = Update<Space.Snapshot>
+    /// An independent iterator over this bucket's outcomes.
+    public typealias AsyncIterator = BucketPartition<Space>.AsyncIterator
+
+    /// Observes outcomes without starting a load.
+    ///
+    /// Initial unavailability is silent. Each iterator has an independent,
+    /// unbounded buffer and retains the bucket until cancelled or released.
+    nonisolated public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(observation: makeSourceObservation(self))
     }
 }

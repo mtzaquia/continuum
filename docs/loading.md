@@ -1,6 +1,6 @@
 # Load snapshots
 
-Continuum offers three loading policies for choosing between established
+Buckets use three loading policies for choosing between established
 memory, local sources, and the remote source. The selected policy also defines
 whether active source work is shared or superseded.
 
@@ -115,8 +115,37 @@ When a retry clears a previous error, update streams reflect the retained
 snapshot, or unavailable state when no snapshot exists. Starting a refresh
 without an error does not duplicate the established result.
 
+## Coordinate loading through a composition
+
+A `Composition` forwards the same `LoadPolicy` to its declared input actions:
+
+```swift
+let feed = Composition {
+  Input(repository.posts) { policy in
+    try await repository.posts.load(using: policy)
+  }
+} transform: { posts in
+  posts
+}
+
+await feed.load(using: .cachedThenRemote)
+```
+
+Every configured action runs; an input without an action is observed only.
+Unlike a bucket load, `Composition.load(using:)` returns `Void` and publishes
+required failures through `latest` and asynchronous iteration. Actions run
+concurrently, and one failure does not cancel the others. Intermediate inputs
+can come from different refresh moments; a composition is not a transaction
+across buckets.
+
+Sequence inputs independently choose whether loading keeps or restarts their
+subscription, defaulting to `subscriptionOnLoad: .keep`. Reading data, iterating,
+and resetting a bucket do not invoke composition loading actions. See
+[Live compositions](composition.md#load-the-composition) for action errors,
+stream subscription behavior, and cancellation.
+
 Next: [Operation ordering](operation-ordering.md) ·
 [Persisting local snapshots](persistence.md) ·
 [Paginating buckets](pagination.md) ·
 [Partitioning buckets](partitioning.md) ·
-[Repository composition](repository-composition.md)
+[Live compositions](composition.md)

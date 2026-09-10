@@ -19,7 +19,8 @@ display-ready data.
 - Distinguish untouched state from a successfully loaded empty result.
 - Observe values, loading, established-snapshot state, and failures with Swift
   Observation.
-- Subscribe to snapshot results and reset transitions as an asynchronous sequence.
+- Read observable outcomes or iterate buckets and compositions directly.
+- Combine required and optional inputs, including external result streams.
 - Try local sources before remote, sharing cached work or superseding it when
   forced from remote.
 - Write normalized snapshots through to one or more local destinations.
@@ -136,11 +137,11 @@ if repository.posts.isLoaded && repository.posts.isEmpty {
 }
 ```
 
-Use `updates()` when a consumer needs an asynchronous sequence instead of
-property observation:
+Buckets, selected partitions, and compositions expose the current observable
+outcome as `latest` and can be iterated directly:
 
 ```swift
-for await update in repository.posts.updates() {
+for await update in repository.posts {
   switch update {
   case .result(.success(let posts)):
     render(posts)
@@ -159,19 +160,28 @@ unavailable; initial and repeated unavailable states stay silent. A replacement
 already available when observation resumes emits its result directly. Creating
 the sequence does not start a load.
 
-Use `bucketUpdates` when a use case needs several repository snapshots:
+Use `Composition` when a use case combines several sources:
 
 ```swift
-let rows = bucketUpdates(
-  observing: (postsRepository.posts, authorsRepository.authors)
-) { posts, authors in
+let rows = Composition {
+  Input(postsRepository.posts)
+  Input(authorsRepository.authors)
+} transform: { posts, authors in
   makeRows(posts: posts, authors: authors)
+}
+
+let current = rows.latest
+for await update in rows {
+  // Handle Update<[FeedRow]> with the same result/reset cases as a bucket.
 }
 ```
 
-The tuple can contain any number of unpartitioned buckets and selected
-partitions. See [Repository composition](docs/repository-composition.md) for a
-complete use case and the result, failure, and reset contract.
+Inputs can be buckets, selected partitions, other compositions, or observable
+closures. They are required by default; use `.optional()` to allow unavailable
+inputs. See [Live compositions](docs/composition.md) for loading actions,
+optional inputs and result streams. The guide also covers integration with
+[Ensemble](https://github.com/mtzaquia/ensemble), a separate SwiftUI
+presentation-state library.
 
 ## Local and remote sources
 
@@ -351,9 +361,6 @@ everywhere. Every event performs the same `reset()`: it clears memory and sends
 `nil` to every writable local source so a later cached load cannot restore the
 invalid snapshot.
 
-The parameterized `reset(including:)` overload is deprecated and remains only
-as a compatibility forwarding overload.
-
 ```swift
 let posts = Bucket(PostsData.all) {
   LocalSource {
@@ -395,8 +402,8 @@ partition behavior.
   accumulate one nested collection while refreshing its siblings.
 - [Partitioning buckets](docs/partitioning.md) — cache and observe several
   independently loaded lists behind one typed key.
-- [Repository composition](docs/repository-composition.md) — keep repositories
-  narrow and assemble display-ready models in use cases.
+- [Live compositions](docs/composition.md) — combine typed optional inputs,
+  observable values, result streams, nested compositions, and loading actions.
 - [Operation ordering](docs/operation-ordering.md) — coordinate mutations,
   refreshes, pagination, cancellation, and local persistence.
 - [Resource lifetime](docs/resource-lifetime.md) — manage partition ownership,
@@ -407,7 +414,8 @@ partition behavior.
 The current implementation includes typed atomic keys, insertion-ordered indexed
 snapshots, atomic load state, typed local and remote source configuration,
 partition-scoped loading, coalescing, write-through local persistence, and
-event-driven invalidation, pagination, and remote mutations. Storage drivers,
+event-driven invalidation, pagination, remote mutations, and live compositions
+with observable and result-sequence inputs. Storage drivers,
 schema migration, persisted pagination checkpoints, and transactions remain
 for subsequent API slices.
 
