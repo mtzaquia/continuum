@@ -25,7 +25,7 @@ import Observation
 @MainActor
 struct RelationshipSource<Value: Sendable> {
     let read: (@MainActor () -> CompositionInputState<Value>)?
-    let load: @MainActor @Sendable (LoadPolicy) async throws -> Value
+    let load: @Sendable @concurrent (LoadPolicy) async throws -> Value
 }
 
 @MainActor
@@ -152,12 +152,15 @@ final class RelationshipInputState<Element: Sendable, ID: Hashable & Sendable, R
         }
     }
 
-    private func operations(for ids: [ID]) -> [(ID, @MainActor @Sendable (LoadPolicy) async throws -> Resolved)] {
+    private func operations(
+        for ids: [ID]
+    ) -> [(ID, @Sendable @concurrent (LoadPolicy) async throws -> Resolved)] {
         ids.compactMap { id in sources[id].map { (id, $0.load) } }
     }
 
     private static func resolve(
-        _ operations: [(ID, @MainActor @Sendable (LoadPolicy) async throws -> Resolved)], policy: LoadPolicy
+        _ operations: [(ID, @Sendable @concurrent (LoadPolicy) async throws -> Resolved)],
+        policy: LoadPolicy
     ) async -> [(ID, Result<Resolved, any Error>)] {
         await withTaskGroup(of: (ID, Result<Resolved, any Error>).self) { group in
             for (id, operation) in operations {

@@ -58,20 +58,23 @@ struct RelationshipInputTests {
     @Test("Observation retains continuing keys and discards removed keys")
     func retention() async {
         let root = Root([Post(id: 1, authorID: 1)])
-        var ids: [Int] = []
+        let ids = Calls()
         let composition = Composition {
-            Input { root.posts }.resolving(\.authorID) { id, _ in ids.append(id); return "\(id)" }
+            Input { root.posts }.resolving(\.authorID) { id, _ in
+                await ids.record(id)
+                return "\(id)"
+            }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
         await until { value(composition.latest)?.authors == [1: "1"] }
         root.posts = [Post(id: 2, authorID: 1), Post(id: 3, authorID: 2)]
         await until { value(composition.latest)?.posts == root.posts }
-        #expect(ids == [1, 2])
+        #expect(await ids.values == [1, 2])
         root.posts = [Post(id: 4, authorID: 2)]
         await until { value(composition.latest)?.posts == root.posts }
         #expect(value(composition.latest)?.authors == [2: "2"])
         root.posts = [Post(id: 5, authorID: 1)]
         await until { value(composition.latest)?.posts == root.posts }
-        #expect(ids == [1, 2, 1])
+        #expect(await ids.values == [1, 2, 1])
     }
 
     @Test("Entry stores, collection removal, reset, failure, and recovery remain observable")
@@ -125,25 +128,22 @@ struct RelationshipInputTests {
     func retryAndPolicy(policy: LoadPolicy) async {
         let source = Source<[Post]>()
         var rootPolicies: [String] = []
-        var resolverPolicies: [String] = []
-        var fail = true
+        let resolver = ResolverProbe()
         let composition = Composition {
             Input(source) { policy in
                 rootPolicies.append(name(policy))
                 source.latest = .result(.success([Post(id: 1, authorID: 1)]))
             }.resolving(\.authorID) { _, policy in
-                resolverPolicies.append(name(policy))
-                if fail { throw LookupError.failed }
-                return "resolved"
+                try await resolver.resolve(policy)
             }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
         await composition.load(using: policy)
         #expect(isFailure(composition.latest))
-        fail = false
+        await resolver.setFailure(false)
         await composition.load(using: policy)
         #expect(value(composition.latest)?.authors == [1: "resolved"])
         #expect(rootPolicies == [name(policy), name(policy)])
-        #expect(resolverPolicies == rootPolicies)
+        #expect(await resolver.policies == rootPolicies)
     }
 
     @Test("New root snapshots and refreshes supersede cancellation-uncooperative work")
@@ -248,10 +248,9 @@ struct RelationshipInputTests {
 
     @Test("Builder branches and reused declarations keep independent paired state")
     func branchesAndReuse() async {
-        var calls = 0
+        let calls = Counter()
         let declaration = Input { [Post(id: 1, authorID: 1)] }.resolving(\.authorID) { _, _ in
-            calls += 1
-            return "\(calls)"
+            "\(await calls.next())"
         }
         let a = Composition { declaration } transform: { posts, authors in Pair(posts: posts, authors: authors) }
         let b = Composition {
@@ -259,7 +258,7 @@ struct RelationshipInputTests {
             Input { 3 }
         } transform: { (posts: [Post]?, authors: [Int: String]?, _: Int) in Pair(posts: posts ?? [], authors: authors ?? [:]) }
         await until { value(a.latest)?.authors.count == 1 && value(b.latest)?.authors.count == 1 }
-        #expect(calls == 2)
+        #expect(await calls.value == 2)
         #expect(value(a.latest)?.authors != value(b.latest)?.authors)
     }
 
@@ -395,11 +394,11 @@ struct RelationshipInputTests {
     @Test("Sequence-backed array inputs resolve their emitted roots and recover from failure")
     func sequenceRoot() async {
         let (stream, producer) = AsyncStream<Result<[Post], LookupError>>.makeStream()
-        var keys: [Int] = []
+        let keys = Calls()
         let composition = Composition {
             Input(updates: { stream }).resolving(\.authorID) { id, policy in
                 #expect(name(policy) == "cached")
-                keys.append(id)
+                await keys.record(id)
                 return "\(id)"
             }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
@@ -410,7 +409,7 @@ struct RelationshipInputTests {
         await until { isFailure(composition.latest) }
         producer.yield(.success([Post(id: 2, authorID: 2)]))
         await until { value(composition.latest)?.authors == [2: "2"] }
-        #expect(keys == [1, 2])
+        #expect(await keys.values == [1, 2])
         producer.finish()
     }
 
@@ -442,7 +441,6 @@ private enum LookupError: Error { case failed }
 }
 @Observable private final class Source<T: Sendable>: UpdateSource {
     var latest: Update<T> = .reset
-    func _latestUpdateForObservation() -> Update<T> { latest }
 }
 private actor Calls {
     var values: [Int] = []
@@ -451,6 +449,26 @@ private actor Calls {
 private actor FailureSwitch {
     var enabled = false
     func set(_ value: Bool) { enabled = value }
+}
+private actor ResolverProbe {
+    var policies: [String] = []
+    private var fails = true
+
+    func resolve(_ policy: LoadPolicy) throws -> String {
+        policies.append(name(policy))
+        if fails { throw LookupError.failed }
+        return "resolved"
+    }
+
+    func setFailure(_ fails: Bool) { self.fails = fails }
+}
+private actor Counter {
+    private(set) var value = 0
+
+    func next() -> Int {
+        value += 1
+        return value
+    }
 }
 @Observable private final class Gate {
     var ids: [Int] = []
@@ -488,6 +506,6 @@ private func value<T>(_ update: Update<T>) -> T? {
 }
 private func isReset<T>(_ update: Update<T>) -> Bool { if case .reset = update { return true }; return false }
 private func isFailure<T>(_ update: Update<T>) -> Bool { if case .result(.failure) = update { return true }; return false }
-private func name(_ policy: LoadPolicy) -> String {
+nonisolated private func name(_ policy: LoadPolicy) -> String {
     switch policy { case .cached: "cached"; case .cachedThenRemote: "cachedThenRemote"; case .remote: "remote" }
 }

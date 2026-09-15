@@ -431,6 +431,29 @@ struct CompositionTests {
         #expect(success(try await firstUpdate(composition)) == 5)
     }
 
+    @Test("Every built-in update source exposes an observable latest outcome")
+    func builtInSourceObservation() async throws {
+        let bucket = Bucket(Key<Int>("uniform.observed-bucket"))
+        #expect(try await observesSourceChange(bucket) {
+            try await bucket.store(1)
+        })
+
+        let partitions = Bucket(
+            Key<Int>("uniform.observed-partition"),
+            partitionedBy: String.self
+        ) { _ in }
+        let partition = partitions["one"]
+        #expect(try await observesSourceChange(partition) {
+            try await partition.store(2)
+        })
+
+        let root = Bucket(Key<Int>("uniform.observed-composition"))
+        let composition = Composition { Input(root) } transform: { $0 + 1 }
+        #expect(try await observesSourceChange(composition) {
+            try await root.store(3)
+        })
+    }
+
     @Test("Direct bucket iteration stays silent initially, emits resets and recovers")
     func directBucketReset() async throws {
         let bucket = Bucket(Key<Int>("uniform.reset"))
@@ -565,8 +588,8 @@ private final class Preferences { var language = "en" }
 @MainActor @Observable
 private final class Source<T: Sendable>: UpdateSource {
     var update: Update<T>
+    var latest: Update<T> { update }
     init(_ update: Update<T> = .reset) { self.update = update }
-    func _latestUpdateForObservation() -> Update<T> { update }
 }
 
 private func success<T>(_ update: Update<T>?) -> T? {
@@ -589,4 +612,21 @@ private struct NumberedError: Error { let number: Int }
 where Source.Element == Update<Int> {
     for try await update in source { return update }
     return nil
+}
+
+@MainActor
+private func observesSourceChange<Source: UpdateSource>(
+    _ source: Source,
+    change: @MainActor () async throws -> Void
+) async rethrows -> Bool {
+    let (events, changed) = AsyncStream<Void>.makeStream()
+    withObservationTracking {
+        _ = source.latest
+    } onChange: {
+        changed.yield(())
+        changed.finish()
+    }
+    var iterator = events.makeAsyncIterator()
+    try await change()
+    return await iterator.next() != nil
 }

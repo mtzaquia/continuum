@@ -214,15 +214,7 @@ final class BucketObservationLifetime: Sendable {
 }
 
 
-extension Composition: UpdateSource, CompositionResetSource {
-    /// Returns the current outcome for aggregate observation.
-    ///
-    /// Use `Input(composition)` to compose outcomes with internal reset
-    /// tracking, or iterate the composition directly to receive ordered updates.
-    public func _latestUpdateForObservation() -> Update<Output> {
-        latest
-    }
-}
+extension Composition: UpdateSource, CompositionResetSource {}
 
 public extension Composition {
     /// Creates a live, observable and asynchronously iterable snapshot composition.

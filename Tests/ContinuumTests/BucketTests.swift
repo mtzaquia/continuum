@@ -1990,16 +1990,13 @@ private struct CollectedDependencyErrors: Error {
 
 @Observable
 private final class TestUpdateSource<Snapshot: Sendable>:
-    BucketUpdateSource
+    UpdateSource
 {
-    private var update: BucketUpdate<Snapshot>
+    private var update: Update<Snapshot>
+    var latest: Update<Snapshot> { update }
 
-    init(_ update: BucketUpdate<Snapshot>) {
+    init(_ update: Update<Snapshot>) {
         self.update = update
-    }
-
-    func _latestUpdateForObservation() -> BucketUpdate<Snapshot> {
-        update
     }
 
     func replace(_ snapshot: Snapshot) {

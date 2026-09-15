@@ -23,8 +23,7 @@
 import Observation
 
 /// A coherent result or unavailable state published by a bucket or composition.
-@available(*, deprecated, renamed: "Update")
-nonisolated public enum BucketUpdate<Snapshot: Sendable>: Sendable {
+nonisolated public enum Update<Snapshot: Sendable>: Sendable {
     /// The bucket established a snapshot or reported an error.
     case result(Result<Snapshot, any Error>)
 
@@ -32,20 +31,18 @@ nonisolated public enum BucketUpdate<Snapshot: Sendable>: Sendable {
     case reset
 }
 
-/// A bucket, selected partition, or composition that can participate in aggregate updates.
+/// The observable-source contract implemented by Continuum types.
 ///
 /// Continuum provides conformances for ``Bucket``, ``BucketPartition``, and
-/// ``Composition``.
-@available(*, deprecated, renamed: "UpdateSource")
+/// ``Composition``. External asynchronous sources should use
+/// ``Input/init(updates:subscriptionOnLoad:load:)`` rather than adding a
+/// conformance.
 @MainActor
-public protocol BucketUpdateSource<Snapshot>: AnyObject {
+public protocol UpdateSource<Snapshot>: AnyObject, Observable {
     associatedtype Snapshot: Sendable
 
-    /// Returns the source's coherent state for aggregate observation.
-    ///
-    /// Iterate the source or use `Input(source)` in a ``Composition`` instead
-    /// of calling this infrastructure method directly.
-    func _latestUpdateForObservation() -> Update<Snapshot>
+    /// The source's current observable outcome.
+    var latest: Update<Snapshot> { get }
 }
 
 /// Observes buckets and transforms their successful snapshots.
@@ -88,7 +85,7 @@ public func bucketUpdates<
 ) -> AsyncStream<Update<Output>> {
     makeBucketUpdates { id, changes in
         let updates = withObservationTracking {
-            (repeat (each sources)._latestUpdateForObservation())
+            (repeat (each sources).latest)
         } onChange: {
             changes.yield(id)
         }
@@ -157,7 +154,7 @@ public func bucketUpdates<
 ) -> AsyncStream<Update<Output>> {
     makeBucketUpdates { id, changes in
         let update = withObservationTracking {
-            source._latestUpdateForObservation()
+            source.latest
         } onChange: {
             changes.yield(id)
         }
@@ -254,18 +251,9 @@ func makeBucketObservation<Output: Sendable>(
     })
 }
 
-extension Bucket: UpdateSource
-where Scope == UnpartitionedBucketScope {
-    public func _latestUpdateForObservation() -> Update<Space.Snapshot> {
-        latestUpdate
-    }
-}
+extension Bucket: UpdateSource where Scope == UnpartitionedBucketScope {}
 
-extension BucketPartition: UpdateSource, CompositionResetSource {
-    public func _latestUpdateForObservation() -> Update<Space.Snapshot> {
-        latestUpdate
-    }
-}
+extension BucketPartition: UpdateSource, CompositionResetSource {}
 
 nonisolated private func successfulSnapshot<Snapshot: Sendable>(
     from update: Update<Snapshot>
@@ -282,7 +270,7 @@ func makeSourceObservation<Source: UpdateSource & Sendable>(
 ) -> (stream: AsyncStream<Update<Source.Snapshot>>, cancel: @Sendable () -> Void) {
     makeBucketObservation { id, changes in
         withObservationTracking {
-            source._latestUpdateForObservation()
+            source.latest
         } onChange: {
             changes.yield(id)
         }
@@ -290,12 +278,14 @@ func makeSourceObservation<Source: UpdateSource & Sendable>(
 }
 
 
-/// A result or reset shared by buckets, partitions, and compositions.
+/// The former name for ``Update``.
 ///
-/// This alias preserves the original nominal type for API compatibility.
-public typealias Update<Value: Sendable> = BucketUpdate<Value>
+/// This alias preserves source compatibility with the original API.
+@available(*, deprecated, renamed: "Update")
+public typealias BucketUpdate<Value: Sendable> = Update<Value>
 
-/// A source whose outcomes can participate in a composition.
+/// The former name for ``UpdateSource``.
 ///
-/// This alias preserves existing custom source conformances.
-public typealias UpdateSource = BucketUpdateSource
+/// This alias preserves source compatibility with the original API.
+@available(*, deprecated, renamed: "UpdateSource")
+public typealias BucketUpdateSource = UpdateSource

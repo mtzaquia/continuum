@@ -84,7 +84,7 @@ public extension Input {
     /// - Returns: A declaration contributing the array and `[ID: Resolved]`.
     func resolving<Element: Sendable, ID: Hashable & Sendable, Resolved: Sendable>(
         _ key: KeyPath<Element, ID> & Sendable,
-        resolve: @escaping @MainActor @Sendable (ID, LoadPolicy) async throws -> Resolved
+        resolve: @escaping @Sendable @concurrent (ID, LoadPolicy) async throws -> Resolved
     ) -> ResolvedInput<Element, ID, Resolved> where Value == [Element] {
         .init(root: self, key: key, select: { id in
             RelationshipSource(read: nil, load: { policy in try await resolve(id, policy) })

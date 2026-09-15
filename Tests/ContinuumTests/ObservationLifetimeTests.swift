@@ -1,4 +1,5 @@
 import Continuum
+import Observation
 import Testing
 
 @Suite("Observation lifetime", .timeLimit(.minutes(1)))
@@ -67,12 +68,12 @@ struct ObservationLifetimeTests {
 }
 
 @MainActor
-private final class LifetimeSource: BucketUpdateSource {
+@Observable
+private final class LifetimeSource: UpdateSource {
     let release: AsyncStream<Void>.Continuation
+    var latest: Update<Int> { .result(.success(1)) }
 
     init(release: AsyncStream<Void>.Continuation) { self.release = release }
-
-    func _latestUpdateForObservation() -> BucketUpdate<Int> { .result(.success(1)) }
 
     deinit {
         release.yield(())

@@ -156,10 +156,11 @@ Input(posts) { policy in
 }
 ```
 
-The closure is main-actor isolated and returns a sendable value. Returned values
-are retained while their keys remain needed, but are not observed after return.
-Use buckets when you need shared caching, persistence, mutation, invalidation,
-or live observation. This bridge has no cache configuration or TTL.
+The sendable closure runs away from main-actor isolation and returns a sendable
+value. Returned values are retained while their keys remain needed, but are not
+observed after return. Use buckets when you need shared caching, persistence,
+mutation, invalidation, or live observation. This bridge has no cache
+configuration or TTL.
 
 ### Understand resolution work
 

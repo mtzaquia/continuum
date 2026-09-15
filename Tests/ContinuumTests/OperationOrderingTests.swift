@@ -200,7 +200,7 @@ struct OperationOrderingTests {
         await gate.started()
         #expect(bucket.error == nil)
         // This is the same current state that the public stream observes.
-        guard case .reset = bucket._latestUpdateForObservation() else {
+        guard case .reset = bucket.latest else {
             await gate.finish(9)
             _ = try await refresh.value
             Issue.record("Expected unavailable state after clearing the failure")

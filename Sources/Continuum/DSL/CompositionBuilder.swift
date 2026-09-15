@@ -47,7 +47,7 @@ public struct Input<Value: Sendable> {
         load: @escaping @MainActor (LoadPolicy) async throws -> Void
     ) where Source.Snapshot == Value {
         self.init(source, loader: CompositionLoad(load, sourceReportsFailure: {
-            if case .result(.failure) = source._latestUpdateForObservation() { return true }
+            if case .result(.failure) = source.latest { return true }
             return false
         }))
     }
@@ -132,7 +132,7 @@ public struct Input<Value: Sendable> {
         _ source: Source, loader: CompositionLoad?
     ) where Source.Snapshot == Value {
         read = {
-            let update = source._latestUpdateForObservation()
+            let update = source.latest
             let loadError = loader?.error
             let resetRevision = (source as? any CompositionResetSource)?.compositionResetRevision ?? 0
             switch update {
@@ -261,4 +261,3 @@ public enum CompositionBuilder {
         Input<T?>(read: { .init(value: .some(nil), unavailable: false, failures: []) })
     }
 }
-

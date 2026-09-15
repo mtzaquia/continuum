@@ -6,7 +6,7 @@ import Testing
 @MainActor @Observable
 final class Source: UpdateSource {
     var update: Update<Int> = .reset
-    func _latestUpdateForObservation() -> Update<Int> { update }
+    var latest: Update<Int> { update }
 }
 
 enum Failure: Error { case test }
