@@ -34,41 +34,40 @@ public enum InputSubscriptionBehavior: Sendable, Equatable {
 @Observable
 final class SequenceInputState<Value: Sendable> {
     var result: Result<Value, any Error>?
-    @ObservationIgnored private(set) var generation: UInt = 0
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var ready: Task<Void, Never>?
     @ObservationIgnored private let start: @MainActor (
-        SequenceInputState<Value>, UInt, AsyncStream<Void>.Continuation
+        SequenceInputState<Value>, AsyncStream<Void>.Continuation
     ) -> Task<Void, Never>
 
-    init<Source: AsyncSequence, Failure: Error>(
+    init<Source: AsyncSequence & Sendable, Failure: Error>(
         _ factory: @escaping @MainActor () -> Source
-    ) where Source.Element == Result<Value, Failure>,
-          Source.AsyncIterator: SendableMetatype {
-        start = { state, generation, ready in
-            Task { @MainActor [weak state] in
+    ) where Source.Element == Result<Value, Failure> {
+        start = { state, ready in
+            Task { @concurrent [weak state] in
                 defer { ready.finish() }
                 guard !Task.isCancelled else { return }
-                var iterator = factory().makeAsyncIterator()
+                let source = await factory()
+                var iterator = source.makeAsyncIterator()
                 ready.yield(())
                 ready.finish()
                 do {
                     while !Task.isCancelled, let result = try await iterator.next() {
-                        guard !Task.isCancelled, let state,
-                              state.generation == generation else { return }
-                        state.result = result.mapError { $0 as any Error }
+                        await state?.receive(result.mapError { $0 as any Error })
                     }
                 } catch {
-                    guard !Task.isCancelled, let state,
-                          state.generation == generation else { return }
-                    state.result = .failure(error)
+                    await state?.receive(.failure(error))
                 }
             }
         }
     }
 
+    private func receive(_ result: Result<Value, any Error>) {
+        guard !Task.isCancelled else { return }
+        self.result = result
+    }
+
     func subscribe() {
-        generation &+= 1
         task?.cancel()
         let (stream, continuation) = AsyncStream<Void>.makeStream()
         // A shared readiness task prevents one cancelled load from terminating
@@ -76,11 +75,14 @@ final class SequenceInputState<Value: Sendable> {
         ready = Task { @MainActor in
             for await _ in stream { break }
         }
-        task = start(self, generation, continuation)
+        task = start(self, continuation)
     }
 
-    func waitUntilSubscribed() async {
-        await ready?.value
+    func waitUntilSubscribed() async throws {
+        let subscription = ready
+        await subscription?.value
+        try Task.checkCancellation()
+        guard ready == subscription else { throw CancellationError() }
     }
 
     deinit { task?.cancel() }

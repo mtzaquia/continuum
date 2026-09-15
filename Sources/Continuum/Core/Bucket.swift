@@ -211,7 +211,7 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// Creates a sequence of snapshot results and reset transitions.
     ///
     /// Creating the sequence does not start a load. See
-    /// ``BucketPartition/updates()`` for its delivery semantics.
+    /// ``BucketPartition/makeAsyncIterator()`` for its delivery semantics.
     @available(*, deprecated, message: "Iterate the bucket or selected partition directly instead of calling updates().")
     func updates() -> AsyncStream<Update<Space.Snapshot>> {
         makeSourceObservation(self).stream
@@ -451,4 +451,9 @@ extension Bucket: AsyncSequence where Scope == UnpartitionedBucketScope {
     nonisolated public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(observation: makeSourceObservation(self))
     }
+}
+
+
+extension Bucket: CompositionResetSource where Scope == UnpartitionedBucketScope {
+    var compositionResetRevision: UInt { storage.compositionResetRevision }
 }

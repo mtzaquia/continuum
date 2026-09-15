@@ -7,53 +7,30 @@
 
 <a href="https://www.buymeacoffee.com/mtzaquia" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 30px !important;" ></a>
 
-`Continuum` is a typed, observable data-bucket library for Swift that keeps repository-owned snapshots coherent from cache to network.
+`Continuum` manages typed snapshots in Swift: load from cache or network,
+observe changes, and combine related data into values your feature can use.
 
-A key establishes the identity and complete snapshot owned by one narrow
-repository. The bucket loads and publishes that snapshot atomically. Use cases
-compose models from several repositories when the UI needs broader,
-display-ready data.
-
-- Store heterogeneous values behind strongly typed keys.
-- Load singleton or insertion-ordered indexed snapshots and merge cursor pages.
-- Distinguish untouched state from a successfully loaded empty result.
-- Observe values, loading, established-snapshot state, and failures with Swift
-  Observation.
-- Read observable outcomes or iterate buckets and compositions directly.
-- Combine required and optional inputs, including external result streams.
-- Try local sources before remote, sharing cached work or superseding it when
-  forced from remote.
-- Write normalized snapshots through to one or more local destinations.
-- Partition one key into independently cached and observable lists.
-
-```swift
-let posts = Bucket(PostsData.all) {
-  RemoteSource(loadPosts)
-}
-
-try await posts.load()
-print(posts.values)
-```
+A **bucket** owns one complete snapshot. A **partition** gives the same bucket
+shape independent snapshots for different keys. A **composition** combines
+current values and coordinates their loading.
 
 ## Install
 
-Continuum 1.0.0 requires Swift 6.3 and supports iOS 17+ and macOS 14+. Add it
-as a Swift Package Manager dependency:
+Requires Swift 6.3, iOS 17+ or macOS 14+. Add the package dependency below
+and the `Continuum` product to your target:
 
 ```swift
-dependencies: [
-  .package(url: "https://github.com/mtzaquia/continuum.git", from: "1.0.0"),
-]
+.package(url: "https://github.com/mtzaquia/continuum.git", from: "1.0.1")
 ```
 
-Add the `Continuum` product to the consuming target, then `import Continuum`
-where it is used.
+These docs describe development on `main`. Composition and direct iteration
+are not in release 1.0.1; use `branch: "main"` to try them before release.
 
 ## Five-minute start
 
-Declare an indexed key for the complete ordered collection a repository owns.
-An identifiable value uses its `id` automatically, giving the bucket
-dictionary-like lookup without changing the source result from `[Post]`:
+Use `Key<Value>` for a single value or `IndexedKey<ID, Value>` for an ordered
+collection. Buckets and compositions are main-actor isolated; source closures
+are sendable asynchronous operations.
 
 ```swift
 import Continuum
@@ -63,361 +40,76 @@ nonisolated struct Post: Identifiable, Sendable {
   let title: String
 }
 
-enum PostsData {
-  static let all = IndexedKey<Post.ID, Post>("posts")
-}
-```
-
-Pass `indexedBy:` when the domain uses another stable identity. Key-path
-arguments must be `Sendable`; see [Key-path migration](docs/operation-ordering.md#use-checked-key-paths)
-when upgrading code that stores key paths in explicitly typed variables.
-
-Create the observable data bucket inside the repository. The key supplied to
-`Bucket` gives every source its snapshot type:
-
-```swift
-import Observation
-
 @MainActor
-@Observable
-final class PostsRepository {
-  let posts: IndexedBucket<Post.ID, Post>
-
-  init(
-    loadCachedPosts: @escaping @Sendable () async throws -> [Post]?,
-    loadRemotePosts: @escaping @Sendable () async throws -> [Post]
-  ) {
-    posts = Bucket(PostsData.all) {
-      LocalSource(loadCachedPosts)
-      RemoteSource(loadRemotePosts)
-    }
+func example() async throws {
+  let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
+    LocalSource { nil }
+    RemoteSource { [Post(id: 1, title: "Hello, Continuum")] }
   }
+
+  try await posts.load()
+  print(posts.values)       // Complete ordered snapshot.
+  print(posts[1]?.title)    // One indexed value.
+
+  try await posts.store(Post(id: 2, title: "Another post"))
+  try await posts.remove(1)
 }
 ```
 
-Repositories and use cases that synchronously access bucket state should be
-explicitly `@MainActor`; the examples do not require a project-wide default
-isolation setting. Source operations are `@Sendable`, so
-capture actors, sendable clients, or immutable values rather than mutable
-UI-owned objects.
+Retain buckets in a repository or feature owner. Replace the example closures
+with your database and client calls. A local source returns `nil` on a miss;
+an empty array is a successful snapshot. `isLoaded` distinguishes that success
+from a bucket that has never loaded.
 
-Load the complete snapshot, read its ordered values, or look up one model by
-index. Concurrent default loads without established memory share source work:
+The default `.cached` policy returns memory or tries local sources before
+remote. Use `.cachedThenRemote` to show cache while refreshing, or `.remote`
+to supersede work and fetch fresh data. [Choose a loading policy →](docs/loading.md)
+
+## Observe and combine
+
+Buckets, selected partitions, and compositions expose an observable `latest`
+outcome and support direct asynchronous iteration:
 
 ```swift
-let repository = PostsRepository(
-  loadCachedPosts: { nil },
-  loadRemotePosts: {
-    [Post(id: 1, title: "A remote value")]
+let titles = Composition {
+  Input(posts) { policy in
+    try await posts.load(using: policy)
   }
-)
-
-try await repository.posts.load()
-
-let currentPosts = repository.posts.values
-let selectedPost = repository.posts[1]
-```
-
-Indexed buckets preserve insertion order. Replacing an existing value retains
-its position; removing and reinserting it appends it to the end. Read ordered
-snapshots through `keys`, `values`, or `elements`; `count` and `isEmpty`
-describe the current contents:
-
-```swift
-let postIDs = repository.posts.keys
-let currentPosts = repository.posts.values
-```
-
-`isLoaded` belongs to the complete bucket, not an individual indexed entry. It
-distinguishes an untouched bucket from a successful empty result:
-
-```swift
-if repository.posts.isLoaded && repository.posts.isEmpty {
-  // The load succeeded and returned no posts.
+} transform: { posts in
+  posts.map(\.title)
 }
-```
 
-Buckets, selected partitions, and compositions expose the current observable
-outcome as `latest` and can be iterated directly:
+await titles.load()
+let current = titles.latest
 
-```swift
-for await update in repository.posts {
+for await update in titles {
   switch update {
-  case .result(.success(let posts)):
-    render(posts)
-  case .result(.failure(let error)):
-    report(error)
-  case .reset:
-    clear()
+  case .result(.success(let titles)): print(titles)
+  case .result(.failure(let error)): print(error)
+  case .reset: break // Clear previously displayed data.
   }
 }
 ```
 
-An established snapshot or current error is emitted immediately. Untouched and
-loading-without-data states remain silent; a successful empty snapshot is still
-emitted. After a result, reset is emitted only while the bucket remains
-unavailable; initial and repeated unavailable states stay silent. A replacement
-already available when observation resumes emits its result directly. Creating
-the sequence does not start a load.
+Add `Input` declarations to combine sources. Inputs are required by default;
+`.optional()` supplies nil when unavailable or failed. `.resolving` derives
+relationships from a collection's keys. Iteration itself never starts a load.
+[Build a live composition →](docs/composition.md)
 
-Use `Composition` when a use case combines several sources:
+## Guides
 
-```swift
-let rows = Composition {
-  Input(postsRepository.posts)
-  Input(authorsRepository.authors)
-} transform: { posts, authors in
-  makeRows(posts: posts, authors: authors)
-}
-
-let current = rows.latest
-for await update in rows {
-  // Handle Update<[FeedRow]> with the same result/reset cases as a bucket.
-}
-```
-
-Inputs can be buckets, selected partitions, other compositions, or observable
-closures. They are required by default; use `.optional()` to allow unavailable
-inputs. See [Live compositions](docs/composition.md) for loading actions,
-optional inputs and result streams. The guide also covers integration with
-[Ensemble](https://github.com/mtzaquia/ensemble), a separate SwiftUI
-presentation-state library.
-
-## Local and remote sources
-
-A data bucket can try zero or more local sources in declaration order before
-falling through to its remote source:
-
-```swift
-let posts = Bucket(PostsData.all) {
-  LocalSource {
-    try await memoryCache.posts()
-  }
-  LocalSource {
-    try await database.posts()
-  }
-  RemoteSource {
-    try await client.posts()
-  }
-}
-```
-
-A local source returns an optional complete snapshot. `nil` means that source
-missed and the bucket should continue to the next one. For an indexed key, `[]`
-is a successful loaded snapshot. A thrown error stops the load.
-
-Add a labeled trailing closure when the same local source can persist complete
-snapshots:
-
-```swift
-let posts = Bucket(PostsData.all) {
-  LocalSource {
-    try await database.posts()
-  } persist: { posts in
-    try await database.replacePosts(with: posts)
-  }
-  RemoteSource {
-    try await client.posts()
-  }
-}
-```
-
-The persistence operation receives `[Post]?`: `nil` removes the persisted
-snapshot, while `[]` persists a known empty result. Remote loads and merged
-pages write through before changing memory. Store and remove instead publish
-optimistically, write through locally, then invoke their configured remote
-operation. See
-[Persisting local snapshots](docs/persistence.md) for ordering and failure
-behavior.
-
-A remote source can progressively disclose mutation capabilities while bucket
-consumers keep using `store` and `remove`:
-
-```swift
-let posts = Bucket(PostsData.all) {
-  RemoteSource {
-    Load {
-      try await client.posts()
-    }
-    Store { post in
-      try await client.store(post)
-    }
-    Remove { id in
-      try await client.removePost(id: id)
-    }
-  }
-}
-```
-
-`Store` can return the server-authoritative model to reconcile the optimistic
-snapshot in local persistence and memory. See
-[Mutating remote values](docs/remote-mutations.md) for ordering, failure
-behavior, and pagination.
-
-Each atomic bucket configuration accepts:
-
-- `LocalSource`: zero or more
-- `RemoteSource`: zero or one
-- `InvalidationSignal`: zero or more
-
-The default `.cached` policy returns established memory immediately, including
-while refresh work is active. Without memory, concurrent cached calls share one
-flight through local sources and then remote fallback.
-
-Use `.cachedThenRemote` to publish memory or the first local hit while always
-continuing to remote:
-
-```swift
-let remotePosts = try await posts.load(using: .cachedThenRemote)
-```
-
-The call returns the remote snapshot. A missing `RemoteSource` throws before
-using cache, and a remote failure preserves any published cached snapshot.
-
-Use `.remote` to cancel and supersede active source work, skip memory and local
-sources, and start a new remote flight. Repeated remote calls are latest-wins;
-obsolete results and errors cannot publish.
-
-A remote source can progressively disclose pagination without changing the
-ordinary form:
-
-```swift
-let posts = Bucket(PostsData.all) {
-  RemoteSource {
-    Load {
-      let response = try await client.posts(after: nil)
-      return Page(values: response.posts, next: response.nextCursor)
-    }
-    NextPage { cursor in
-      let response = try await client.posts(after: cursor)
-      return Page(values: response.posts, next: response.nextCursor)
-    }
-  }
-}
-
-try await posts.load()
-
-if posts.hasNextPage {
-  try await posts.loadNext()
-}
-```
-
-The initial page replaces the complete snapshot. For an indexed bucket, later
-pages append in order and replace duplicate indices without moving them.
-`NextPage(accumulating:indexedBy:_:)` can instead accumulate one nested
-collection while refreshing its sibling values. Page loading has separate
-observable state; see [Paginating buckets](docs/pagination.md).
-
-## Partition independent lists
-
-Pass `partitionedBy:` when one key shape has several stable query variants,
-such as accounts available for buying and selling. The configuration receives
-the partition value once, and its source operations capture that value:
-
-```swift
-let accounts = Bucket(
-  AccountsData.all,
-  partitionedBy: Purpose.self
-) { purpose in
-  LocalSource {
-    try await database.accounts(purpose: purpose)
-  }
-  RemoteSource {
-    try await client.accounts(purpose: purpose)
-  }
-}
-```
-
-Select a partition before reading, loading, or mutating its atomic snapshot:
-
-```swift
-try await accounts[.buy].load()
-
-accounts[.buy].isLoaded
-accounts[.buy].values
-accounts[.buy][accountID]
-```
-
-Each partition has independent values, loading state, and coalesced work.
-Different partitions can load concurrently. Partitioning is fixed structurally
-by the initializer, while the trailing DSL contains only source capabilities.
-
-## Reset and invalidate snapshots
-
-`reset()` forgets memory, cancels active source and mutation tasks, and removes
-every persisted snapshot owned by a local source with a `persist:` closure:
-
-```swift
-try await posts.reset()
-```
-
-Memory and pagination reset immediately, then writable local sources receive
-`nil` in declaration order. A failure restores the previous observable state,
-attempts to restore local persistence, throws, and becomes visible through
-`error`.
-
-Use `InvalidationSignal` when an application event means a snapshot is stale
-everywhere. Every event performs the same `reset()`: it clears memory and sends
-`nil` to every writable local source so a later cached load cannot restore the
-invalid snapshot.
-
-```swift
-let posts = Bucket(PostsData.all) {
-  LocalSource {
-    try await database.posts()
-  } persist: { posts in
-    try await database.replacePosts(with: posts)
-  }
-
-  RemoteSource {
-    try await client.posts()
-  }
-
-  InvalidationSignal {
-    NotificationCenter.default.notifications(
-      named: .accountDidChange
-    )
-  }
-}
-```
-
-The bucket owns the observation for its lifetime. See
-[Invalidating snapshots](docs/invalidation.md) for sequence failures and
-partition behavior.
-
-## Documentation
-
-- [Diagnosing bucket operations](docs/diagnostics.md) — follow correlated load,
-  mutation, persistence, invalidation, and pagination stories in unified logs.
-- [Loading snapshots](docs/loading.md) — choose cached, cache-then-remote, or
-  latest-wins remote loading and understand their state transitions.
-- [Persisting local snapshots](docs/persistence.md) — make local sources
-  writable and understand atomic-state, ordering, and failure behavior.
-- [Mutating remote values](docs/remote-mutations.md) — add typed remote store
-  and removal capabilities while preserving the atomic snapshot pipeline.
-- [Invalidating snapshots](docs/invalidation.md) — reset memory and writable
-  local sources together, and invalidate stale snapshots from application
-  events.
-- [Paginating buckets](docs/pagination.md) — append ordered snapshots or
-  accumulate one nested collection while refreshing its siblings.
-- [Partitioning buckets](docs/partitioning.md) — cache and observe several
-  independently loaded lists behind one typed key.
-- [Live compositions](docs/composition.md) — combine typed optional inputs,
-  observable values, result streams, nested compositions, and loading actions.
-- [Operation ordering](docs/operation-ordering.md) — coordinate mutations,
-  refreshes, pagination, cancellation, and local persistence.
-- [Resource lifetime](docs/resource-lifetime.md) — manage partition ownership,
-  observation buffering, and indexed-snapshot costs.
-
-## Current scope
-
-The current implementation includes typed atomic keys, insertion-ordered indexed
-snapshots, atomic load state, typed local and remote source configuration,
-partition-scoped loading, coalescing, write-through local persistence, and
-event-driven invalidation, pagination, remote mutations, and live compositions
-with observable and result-sequence inputs. Storage drivers,
-schema migration, persisted pagination checkpoints, and transactions remain
-for subsequent API slices.
+| I want to… | Read |
+| --- | --- |
+| Choose cache and refresh behavior | [Loading](docs/loading.md) |
+| Combine values, streams, and relationships | [Compositions](docs/composition.md) |
+| Keep independent snapshots for different keys | [Partitioning](docs/partitioning.md) |
+| Save snapshots to local storage | [Persistence](docs/persistence.md) |
+| Send mutations to a server | [Remote mutations](docs/remote-mutations.md) |
+| Fetch and merge subsequent pages | [Pagination](docs/pagination.md) |
+| Clear stale data | [Invalidation](docs/invalidation.md) |
+| Understand cancellation and overlapping work | [Operation ordering](docs/operation-ordering.md) |
+| Manage retention and observation costs | [Resource lifetime](docs/resource-lifetime.md) |
+| Inspect loading and mutation activity | [Diagnostics](docs/diagnostics.md) |
 
 ## License
 

@@ -1,109 +1,55 @@
 # Invalidate snapshots
 
-Invalidation returns a bucket to absent state when its established data is no
-longer valid. `reset()` always forgets observable memory and removes snapshots
-from every writable local source:
+Use `reset()` when a snapshot is no longer valid:
 
 ```swift
 try await posts.reset()
 ```
 
-Continuum resets memory and pagination state immediately, then sends `nil` to
-each writable `LocalSource` sequentially in declaration order. It stops at the
-first error. A failure restores the previous observable snapshot and pagination
-checkpoint, attempts to restore local persistence, appears as `error`, and
-causes the call to throw.
-
-An active bucket iterator emits `.reset` while the bucket remains unavailable. If replacement data is already available when observation resumes,
-it emits that result directly. A failed reset emits its failure after state is
-restored.
-
-## Invalidate a composition input
-
-A required bucket reset clears a composition's previously published outcome.
-An optional bucket reset contributes nil and allows the transform to run when
-all required inputs are available. If another required input is failing, the
-composition emits reset before failure so a consumer can clear invalid retained
-data before displaying the error.
-
-Other inputs keep their state: external streams continue listening, observable
-expressions remain observed, and unrelated buckets are unchanged. A reset does
-not call loading actions or restart stream subscriptions. Required data becoming
-available again lets the composition recover using the latest inputs. See
-[Composition outcomes and resets](composition.md#observe-outcomes-and-resets)
-for the full contract, including nested compositions.
+Reset supersedes source work and mutations, clears memory and pagination, and
+sends `nil` to writable local sources. This prevents a later cached load from
+restoring stale data. A persistence failure restores the previous state,
+attempts to restore storage, and throws. [Persistence rules →](persistence.md)
 
 ## Observe application events
 
-Add an `InvalidationSignal` when each element of a sendable `AsyncSequence`
-means the snapshot is stale in both memory and writable local storage:
+An `InvalidationSignal` performs the same reset for every event:
 
 ```swift
 import Foundation
 
-let posts = Bucket(PostsData.all) {
+let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
   LocalSource {
     try await database.posts()
-  } persist: { posts in
-    try await database.replacePosts(with: posts)
+  } persist: { snapshot in
+    try await database.replacePosts(with: snapshot)
   }
-
-  RemoteSource {
-    try await client.posts()
-  }
-
+  RemoteSource { try await client.posts() }
   InvalidationSignal {
-    NotificationCenter.default.notifications(
-      named: .accountDidChange
-    )
+    NotificationCenter.default.notifications(named: .accountDidChange)
   }
 }
 ```
 
-The event values are intentionally ignored. Their arrival always performs
-`reset()`: memory and pagination reset immediately, then each writable
-`LocalSource` receives `nil`. This prevents the next `.cached` load from
-resurrecting the invalid snapshot. Any number of invalidation signals can be
-declared.
+The event sequence must be sendable; its element values are ignored. A bucket
+owns its subscriptions for its lifetime. A partition starts its subscriptions
+on first access, so an application-wide signal is observed once per accessed
+partition.
 
-An unpartitioned bucket starts each observation when it is created and cancels
-it when released. A sequence that finishes stops observing normally. A sequence
-failure becomes the bucket's observable `error` and ends only that observation.
+A failed reset leaves the subscription running so a later event can retry.
+Sequence completion ends that subscription; a sequence error becomes the
+bucket's error and ends it.
 
-If an event-triggered reset fails, Continuum restores the previous observable
-state and `error` exposes the persistence failure. The event sequence stays
-active, so a later event retries the reset.
+## Understand observable resets
 
-## Invalidate partitions independently
+A bucket iterator emits reset after a result while the bucket remains
+unavailable. If replacement data is already available when observation resumes,
+it emits that result directly.
 
-A partitioned bucket creates a partition's configuration on the first access
-through the outer subscript. Each such partition owns its own invalidation
-observations. Its events perform the same reset, but only for
-that partition's captured local destinations:
+Compositions preserve required-input reset history, including through nesting.
+Optional resets contribute nil. A resolved root also discards its relationship
+values; resetting a selected required partition invalidates the pair without
+reloading it. Unrelated inputs keep observing and are not reset or restarted.
+[Composition outcomes →](composition.md#observe-outcomes-and-resets)
 
-```swift
-let accounts = Bucket(
-  AccountsData.all,
-  partitionedBy: Purpose.self
-) { purpose in
-  LocalSource {
-    try await database.accounts(purpose: purpose)
-  } persist: { accounts in
-    try await database.replaceAccounts(
-      accounts,
-      purpose: purpose
-    )
-  }
-
-  InvalidationSignal {
-    accountChanges.values(for: purpose)
-  }
-}
-```
-
-An application-wide event sequence declared for every partition is observed
-once per partition that has been accessed.
-
-Next: [Persisting local snapshots](persistence.md) ·
-[Loading snapshots](loading.md) ·
-[Partitioning buckets](partitioning.md)
+Next: [Operation ordering](operation-ordering.md) · [Compositions](composition.md)

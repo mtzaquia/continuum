@@ -56,31 +56,5 @@ Load flights are shared work: cancellation of one awaiting load caller does not
 cancel the underlying source flight. Reset, mutation, or forced remote loading
 supersedes source work according to the table above.
 
-## Use checked key paths
-
-The key-path overloads of `IndexedKey` and nested `NextPage` accumulation now
-require `Sendable` key paths. This is a source-compatibility change for callers
-that erased that capability or used actor-isolated paths.
-
-Ordinary property literals on nonisolated domain values keep the same syntax.
-Preserve sendability when naming a key path:
-
-```swift
-nonisolated struct Post: Identifiable, Sendable {
-  let id: Int
-}
-
-let identity: KeyPath<Post, Int> & Sendable = \.id
-let posts = IndexedKey<Int, Post>("posts", indexedBy: identity)
-```
-
-Nested accumulation similarly accepts `WritableKeyPath<Snapshot, [Element]>
-& Sendable` and `KeyPath<Element, Index> & Sendable`. In projects with default
-main-actor isolation, mark value-only domain models `nonisolated`.
-
-Key paths can capture subscript arguments. A mutable non-Sendable capture is
-rejected even when the key-path object itself never changes. For computed
-indexing, the existing `@Sendable` closure overload remains available.
-
 Next: [Loading snapshots](loading.md) · [Remote mutations](remote-mutations.md) ·
 [Resource lifetime](resource-lifetime.md)

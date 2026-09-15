@@ -59,15 +59,7 @@ nonisolated public struct RemoteSource<
     public init(
         _ operation: @escaping @Sendable () async throws -> Space.Snapshot
     ) {
-        self.operation = {
-            RemoteSnapshot(
-                snapshot: try await operation(),
-                nextPage: nil
-            )
-        }
-        isPaginated = false
-        store = nil
-        remove = nil
+        self.init(load: Load(operation))
     }
 
     /// Creates an advanced remote source.

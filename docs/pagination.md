@@ -1,196 +1,72 @@
 # Paginate a bucket
 
-Pagination extends an atomic snapshot without turning its entries into
-independently loaded resources. The remote source owns the typed cursor
-operations and merge behavior; repository consumers load the first snapshot
-normally and request later pages through the bucket.
-
-## Declare both page operations
-
-Keep `Load` and `NextPage` together inside `RemoteSource`:
+Keep the initial load and continuation together inside `RemoteSource`:
 
 ```swift
-let accounts = Bucket(
-  AccountsData.all,
-  partitionedBy: Purpose.self
-) { purpose in
+let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
   RemoteSource {
     Load {
-      let response = try await client.accounts(
-        purpose: purpose,
-        after: nil
-      )
-
-      return Page(
-        values: response.accounts,
-        next: response.nextCursor
-      )
+      let page = try await client.posts(after: nil)
+      return Page(values: page.posts, next: page.nextCursor)
     }
-
     NextPage { cursor in
-      let response = try await client.accounts(
-        purpose: purpose,
-        after: cursor
-      )
-
-      return Page(
-        values: response.accounts,
-        next: response.nextCursor
-      )
+      let page = try await client.posts(after: cursor)
+      return Page(values: page.posts, next: page.nextCursor)
     }
   }
 }
+
+try await posts.load(using: .remote)
+if posts.hasNextPage {
+  try await posts.loadNext()
+}
 ```
 
-The builder requires exactly one `Load` followed by one `NextPage`.
-`Load` establishes the cursor type from its `Page` result. `NextPage`
-receives that cursor without receiving the key or stable partition value again.
+The initial page replaces the snapshot. Later pages append entries; duplicate
+indices keep their original position and take the newest value. Return
+`next: nil` when exhausted. Further `loadNext()` calls then return the current
+snapshot without fetching.
 
-Return `next: nil` when the remote collection is exhausted. Cursor values stay
-inside these operations; the selected partition stores a continuation
-checkpoint without exposing transport pagination types to consumers.
+A cached local snapshot does not establish a cursor. Use a remote-reaching load
+before requesting pages. Each partition owns an independent continuation.
 
-The ordinary `RemoteSource { snapshot }` form remains unchanged for
-non-paginated buckets.
+## Accumulate a nested collection
 
-Optional `Store` and `Remove` capabilities follow `NextPage`. Explicit
-mutations update the complete accumulated snapshot without discarding the
-current cursor:
+For an aggregate response, name the collection to merge:
 
 ```swift
 RemoteSource {
   Load {
-    let response = try await client.posts(after: nil)
-    return Page(
-      values: response.posts,
-      next: response.nextCursor
-    )
+    let page = try await client.subscription(after: nil)
+    return Page(value: page.subscription, next: page.nextCursor)
   }
-  NextPage { cursor in
-    let response = try await client.posts(after: cursor)
-    return Page(
-      values: response.posts,
-      next: response.nextCursor
-    )
-  }
-  Store { post in
-    try await client.store(post)
-  }
-  Remove { id in
-    try await client.removePost(id: id)
+  NextPage(accumulating: \.runs, indexedBy: \.id) { cursor in
+    let page = try await client.subscription(after: cursor)
+    return Page(value: page.subscription, next: page.nextCursor)
   }
 }
 ```
 
-## Accumulate a nested collection
+The incoming aggregate supplies all sibling properties; only `runs` accumulates.
+Both key paths must be sendable, and the collection path must be writable.
+Stored path variables must preserve `& Sendable` in their declared type.
 
-When the remote response contains a larger aggregate, return that complete
-value from each `Page` and declare the one nested collection that accumulates
-on `NextPage`:
+## Observe and retry
 
-```swift
-let subscription = Bucket(SubscriptionsData.current) {
-  RemoteSource {
-    Load {
-      let response = try await client.subscription(after: nil)
+Continuation work exposes `isLoadingNextPage`, `hasNextPage`, `nextPageError`,
+and `pagination`. Initial loading still uses `isLoading`, `isLoaded`, and `error`.
+A failed page retains its snapshot and cursor; another `loadNext()` retries it.
 
-      return Page(
-        value: response.subscription,
-        next: response.nextCursor
-      )
-    }
-
-    NextPage(
-      accumulating: \.runs,
-      indexedBy: \.id
-    ) { cursor in
-      let response = try await client.subscription(after: cursor)
-
-      return Page(
-        value: response.subscription,
-        next: response.nextCursor
-      )
-    }
-  }
-}
-```
-
-The initial page replaces the complete `Subscription`. For each continuation,
-the incoming `Subscription` becomes the new base, so properties beside `runs`
-use their latest remote values. Only `runs` accumulates. Existing run indices
-retain their position, duplicate indices use the latest value, and new indices
-append in remote page order.
-
-The accumulation key path must be writable because Continuum constructs the
-merged aggregate before publishing it.
-
-## Load and merge pages
-
-Use `load()` for the initial remote page, then `loadNext()` while another page is
-available:
-
-```swift
-let buying = repository.accounts[.buy]
-
-try await buying.load(using: .cachedThenRemote)
-
-if buying.hasNextPage {
-  try await buying.loadNext()
-}
-```
-
-The initial remote page is a complete snapshot replacement. For an indexed
-snapshot, each continuation page is appended in page order. When a page repeats
-an existing index, its new value replaces the old value without moving that
-index. Nested accumulation follows the merge behavior declared by `NextPage`.
-
-When the latest page returns no cursor, `hasNextPage` becomes false and another
-`loadNext()` returns the current snapshot without starting source work.
-
-A local-only initial load cannot establish a remote cursor. Call
-`load(using: .cachedThenRemote)` or `.remote` before `loadNext()` when local
-sources may satisfy the default cached load.
-
-## Observe continuation state
-
-Initial loading remains described by `state`, `isLoading`, `isLoaded`, and
-`error`. Continuation work has separate observable state:
-
-```swift
-buying.isLoadingNextPage
-buying.hasNextPage
-buying.nextPageError
-buying.pagination
-```
-
-The established snapshot remains loaded while a continuation request runs or
-fails. A failed page leaves both the current values and cursor available, so a
-later `loadNext()` retries the same position. A successful retry clears
+Calling without pagination throws `missingPaginatedRemoteSource`; calling before
+an initial remote page throws `initialPageNotLoaded`. Both appear in
 `nextPageError`.
 
-Calling `loadNext()` without paginated remote operations throws
-`ContinuumError.missingPaginatedRemoteSource(namespace:)`. Calling it before
-the initial remote page throws
-`ContinuumError.initialPageNotLoaded(namespace:)`. Both failures are exposed
-through `nextPageError`.
+Concurrent calls for one cursor share work. Page loading waits for mutations and
+initial loading before capturing its base. A mutation or forced refresh can
+supersede it. [Operation ordering →](operation-ordering.md)
 
-## Coordinate page work
+If new entries introduce foreign keys, an ordinary
+`Input(posts).resolving(\.authorID, from: authors)` resolves them before publishing
+the expanded pair. [Relationship resolution →](composition.md#resolve-relationships)
 
-Concurrent `loadNext()` calls for the same cursor share one source operation.
-A continuation waits for pending store, remove, and reset operations before
-capturing the snapshot it will extend. A mutation started during page work
-supersedes that page. This prevents reconciliation or rollback from discarding
-a successfully published page. See [Operation ordering](operation-ordering.md)
-for the interactions with other loading policies.
-
-A remote load supersedes continuation work and replaces the merged snapshot
-with a new initial page. Generation checks prevent obsolete page values from
-entering the refreshed snapshot, including when the source ignores cooperative
-cancellation.
-
-Different partitions keep independent values, cursors, continuation state, and
-in-flight work.
-
-Next: [Loading snapshots](loading.md) ·
-[Mutating remote values](remote-mutations.md) ·
-[Partitioning buckets](partitioning.md) · [Resource lifetime](resource-lifetime.md)
+Next: [Compositions](composition.md) · [Persistence](persistence.md)

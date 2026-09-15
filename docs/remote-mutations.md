@@ -1,91 +1,38 @@
 # Mutate remote values
 
-A `RemoteSource` can own the operations that create, update, and delete its
-values. Repositories keep their transport dependencies inside the source DSL,
-while consumers continue to use the same typed bucket operations.
-
-## Add mutation capabilities
-
-Use `Load` when a remote source also declares `Store` or `Remove`:
+Declare `Load`, followed by optional `Store` and `Remove` capabilities inside
+`RemoteSource`. Consumers keep using the bucket's ordinary mutation methods.
 
 ```swift
-let posts = Bucket(PostsData.all) {
-  LocalSource {
-    try await database.posts()
-  } persist: { posts in
-    try await database.replacePosts(with: posts)
-  }
-
+let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
   RemoteSource {
-    Load {
-      try await client.posts()
-    }
-
-    Store { post in
-      try await client.store(post)
-    }
-
-    Remove { id in
-      try await client.removePost(id: id)
-    }
+    Load { try await client.posts() }
+    Store { post in try await client.store(post) }
+    Remove { id in try await client.removePost(id: id) }
   }
 }
-```
 
-The builder requires one `Load`, followed by at most one `Store` and at most
-one `Remove` in that order. Omitting either mutation keeps the corresponding
-bucket operation local-only. A read-only source can retain the shorter
-`RemoteSource { snapshot }` form.
-
-Repository consumers do not call source capabilities directly:
-
-```swift
 try await posts.store(draft)
 try await posts.remove(postID)
 ```
 
-The same shape works in a partition configuration because each operation can
-capture the stable partition value supplied by `Bucket`:
+Each capability appears at most once, in that order. Omitting one keeps the
+corresponding mutation local-only. A read-only source can use
+`RemoteSource { try await client.posts() }`.
 
-```swift
-let accounts = Bucket(
-  AccountsData.all,
-  partitionedBy: Purpose.self
-) { purpose in
-  RemoteSource {
-    Load {
-      try await client.accounts(purpose: purpose)
-    }
-    Store { account in
-      try await client.store(account, purpose: purpose)
-    }
-    Remove { id in
-      try await client.removeAccount(id: id, purpose: purpose)
-    }
-  }
-}
-```
+## Reconcile server-assigned values
 
-## Publish the authoritative value
-
-`Store` returns the value established by the remote system. This lets the
-server assign an identifier, normalize fields, or attach version metadata
-after the submitted value has entered optimistic local persistence and
-observable memory:
+`Store` can return the authoritative model, including a server-assigned ID:
 
 ```swift
 Store { draft in
-  let response = try await client.createPost(draft)
-  return response.post
+  try await client.createPost(draft)
 }
 ```
 
-When the authoritative indexed value has a different identifier, Continuum
-removes the submitted identifier before inserting the returned value. The
-snapshot therefore does not retain both the draft and its server-created form.
-
-If the remote system only acknowledges the request, use the `Void`-returning
-overload. Continuum then retains the submitted value:
+Continuum replaces the submitted indexed identity when the returned identity
+differs. If the server only acknowledges the write, the `Void`-returning overload
+retains the submitted model:
 
 ```swift
 Store { post in
@@ -93,86 +40,22 @@ Store { post in
 }
 ```
 
-## Understand ordering and failure
+For a singleton bucket, consumers call `remove()` without an argument. Its
+remote capability can be written `Remove<SingletonInput> { ... }`.
 
-An explicit remote mutation runs in this order:
+## Understand failure and ordering
 
-1. Derive and normalize the submitted complete snapshot.
-2. Publish it to observable memory and persist it through writable local
-   sources in declaration order.
-3. Invoke `Store` or `Remove`.
-4. For `Store`, reconcile any server-authoritative value, then publish and
-   persist the reconciled snapshot.
+Mutations publish optimistically and persist locally before contacting the
+server. Reconciliation publishes and persists the authoritative snapshot.
+Failure restores the previous snapshot if the mutation still owns the state;
+remote side effects cannot be undone by local rollback.
 
-A failure restores the prior snapshot in observable memory and attempts to
-write that snapshot back through writable local sources in declaration order.
-Continuum exposes the original failure through both the throwing bucket call
-and `error`. A remote system can still have applied a request that fails
-ambiguously, so this is UI and local-state rollback rather than a distributed
-transaction.
+Concurrent mutations are serialized. Reset and `.remote` loads supersede them;
+`.cachedThenRemote` and `loadNext()` wait. Cancellation restores state only while
+the mutation still owns it. See [Operation ordering](operation-ordering.md) and
+[Persistence](persistence.md) for the complete contracts.
 
-Concurrent stores and removes are serialized across the complete pipeline.
-Reset supersedes queued and running mutations, and does not invoke remote
-mutation capabilities. A forced `.remote` load also supersedes mutations;
-`.cachedThenRemote` and `loadNext()` wait for them.
+In a paginated source, place `Store` and `Remove` after `NextPage`. Mutations
+update the accumulated snapshot while preserving its cursor.
 
-Caller cancellation restores memory and attempts to restore local persistence
-when the mutation still owns the state. Cleanup finishes before its throwing
-call completes, and cancellation does not become the bucket's `error`.
-Superseded mutations cannot roll back their replacement. See
-[Operation ordering](operation-ordering.md) for the complete policy.
-
-## Combine mutations with pagination
-
-For a paginated source, declare mutation capabilities after `NextPage`:
-
-```swift
-RemoteSource {
-  Load {
-    let response = try await client.posts(after: nil)
-    return Page(
-      values: response.posts,
-      next: response.nextCursor
-    )
-  }
-  NextPage { cursor in
-    let response = try await client.posts(after: cursor)
-    return Page(
-      values: response.posts,
-      next: response.nextCursor
-    )
-  }
-  Store { post in
-    try await client.store(post)
-  }
-  Remove { id in
-    try await client.removePost(id: id)
-  }
-}
-```
-
-Storing or removing a value updates the complete accumulated snapshot and
-preserves the current continuation checkpoint. Local persistence receives that
-complete snapshot, including all pages loaded so far.
-
-For a singleton key, the zero-argument remote removal can be made explicit with
-`Remove<SingletonInput>`:
-
-```swift
-RemoteSource {
-  Load<Int> {
-    try await client.count()
-  }
-  Store<Int> { count in
-    try await client.setCount(count)
-  }
-  Remove<SingletonInput> {
-    try await client.removeCount()
-  }
-}
-```
-
-Consumers still call `try await count.remove()` without supplying an input.
-
-Next: [Persisting local snapshots](persistence.md) ·
-[Paginating buckets](pagination.md) · [Partitioning buckets](partitioning.md)
+Next: [Pagination](pagination.md) · [Persistence](persistence.md)

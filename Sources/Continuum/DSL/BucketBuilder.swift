@@ -65,9 +65,7 @@ public enum BucketBuilder<Space: ContinuumKeySpace>: Sendable {
     public static func buildBlock(
         _ components: BucketConfiguration<Space>...
     ) -> BucketConfiguration<Space> {
-        components.reduce(BucketConfiguration()) { result, component in
-            result.merging(component)
-        }
+        buildArray(components)
     }
 
     /// Adds a local source expression to the accumulated configuration.

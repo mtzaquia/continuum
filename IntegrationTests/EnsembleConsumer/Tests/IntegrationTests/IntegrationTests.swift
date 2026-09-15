@@ -39,6 +39,51 @@ struct IntegrationTests {
         if case .unavailable = data.latestValue {} else { Issue.record("Expected reset to clear data") }
     }
 
+    @MainActor @Test func relationshipResetFailureAndRetry() async throws {
+        let service = RelationshipService()
+        let names = Bucket(Key<String>("ensemble.names"), partitionedBy: Int.self) { id in
+            RemoteSource { try await service.name(id) }
+        }
+        let child = Composition {
+            Input { [1] }.resolving(\.self, from: names)
+        } transform: { _, names in names[1] ?? "" }
+        let composition = Composition {
+            Input(child) { policy in await child.load(using: policy) }
+        } transform: { $0 }
+        let context = ViewDataContext()
+        let data = ViewData<String>()
+        let (updates, observed) = AsyncStream<Update<String>>.makeStream()
+        var received = updates.makeAsyncIterator()
+        context.bind({ composition }, to: data) { update, sink in
+            switch update {
+            case .result(let result): sink.receive(result)
+            case .reset: sink.reset()
+            }
+            observed.yield(update)
+        }
+        await composition.load()
+        while let update = await received.next() {
+            if case .result(.success("name-1")) = update { break }
+        }
+        if case .available("name-1") = data.latestValue {} else { Issue.record("Expected resolved name") }
+        try await names[1].reset()
+        await service.setFailure(true)
+        await composition.load(using: .remote)
+        var sawReset = false
+        while let update = await received.next() {
+            if case .reset = update { sawReset = true }
+            if case .result(.failure) = update { break }
+        }
+        #expect(sawReset)
+        if case .unavailable = data.latestValue {} else { Issue.record("Reset relationships must clear retained data") }
+        await service.setFailure(false)
+        await composition.load(using: .remote)
+        while let update = await received.next() {
+            if case .result(.success("name-1")) = update { break }
+        }
+        if case .available("name-1") = data.latestValue {} else { Issue.record("Relationship retry must recover") }
+    }
+
     @MainActor @Test func bindingResetFailureAndRetry() async {
         let a = Source()
         let b = Source()
@@ -88,5 +133,14 @@ struct IntegrationTests {
             if case .result(.success(30)) = update { break }
         }
         if case .available(30) = data.latestValue {} else { Issue.record("Retry must recover") }
+    }
+}
+
+private actor RelationshipService {
+    private var fails = false
+    func setFailure(_ fails: Bool) { self.fails = fails }
+    func name(_ id: Int) throws -> String {
+        if fails { throw Failure.test }
+        return "name-\(id)"
     }
 }

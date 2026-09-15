@@ -41,7 +41,7 @@ protocol CompositionResetSource: AnyObject {
 @Observable
 final class CompositionLoad {
     var error: (any Error)?
-    @ObservationIgnored var generation = 0
+    @ObservationIgnored private var currentTask: Task<Void, any Error>?
     let action: @MainActor (LoadPolicy) async throws -> Void
     let sourceReportsFailure: @MainActor () -> Bool
 
@@ -55,14 +55,18 @@ final class CompositionLoad {
 
     func run(_ policy: LoadPolicy) async {
         guard !Task.isCancelled else { return }
-        generation += 1
-        let current = generation
         error = nil
-        do {
+        let action = action
+        let task = Task {
             try Task.checkCancellation()
             try await action(policy)
+        }
+        currentTask = task
+        defer { if currentTask == task { currentTask = nil } }
+        do {
+            try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         } catch {
-            guard current == generation, !Task.isCancelled,
+            guard currentTask == task, !Task.isCancelled,
                   !(error is CancellationError) else { return }
             if !sourceReportsFailure() { self.error = error }
         }
@@ -108,7 +112,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     @ObservationIgnored private var previousUnavailable: [Bool] = []
     @ObservationIgnored private var previousResetRevisions: [UInt] = []
     @ObservationIgnored private var hasResult = false
-    @ObservationIgnored private var observationID = 0
+    @ObservationIgnored private let observation = ObservationSubscription()
 
     init(
         loads: [@MainActor @Sendable (LoadPolicy) async -> Void],
@@ -139,15 +143,8 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     }
 
     private func recompute() {
-        observationID += 1
-        let id = observationID
-        let state = withObservationTracking {
-            evaluate()
-        } onChange: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, self.observationID == id else { return }
-                self.recompute()
-            }
+        let state = observation.track { evaluate() } onChange: { [weak self] in
+            self?.recompute()
         }
         let reset = zip(state.unavailable, previousUnavailable).contains { $0 && !$1 }
         let nestedReset = zip(state.resetRevisions, previousResetRevisions).contains { $0 != $1 }
@@ -234,7 +231,9 @@ public extension Composition {
     /// A thrown transform error also fails the outcome. Loading is explicit through
     /// ``Composition/load(using:)``. Conditions select dependencies once.
     ///
-    /// Construction starts observation immediately without starting loads.
+    /// Construction starts observation immediately. Ordinary input loading
+    /// actions remain explicit; relationship inputs resolve keys once their
+    /// root is available, using the cached policy outside explicit loads.
     ///
     /// - Parameters:
     ///   - inputs: The snapshot and observable dependencies in transform order.
@@ -245,10 +244,11 @@ public extension Composition {
         mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
         transform: @escaping @MainActor (repeat each Value) throws -> Output
     ) {
-        let declarations = inputs().inputs
-        let inputs = (repeat (each declarations).resolved())
+        let inputs = inputs().makeInputs()
         var loads: [@MainActor @Sendable (LoadPolicy) async -> Void] = []
-        for input in repeat each inputs { loads.append(contentsOf: input.loads) }
+        for input in repeat each inputs {
+            if let load = input.load { loads.append(load) }
+        }
         self.init(loads: loads) {
             let states = (repeat (each inputs).read())
             var unavailable: [Bool] = []

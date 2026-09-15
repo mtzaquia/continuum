@@ -1,65 +1,44 @@
 # Manage resource lifetime
 
-Buckets retain cached snapshots and the work needed to observe them. Scope
-repository ownership and observation tasks to the period when those resources
-are useful.
+Retain buckets in a repository or feature owner, and retain compositions for as
+long as their derived values are useful.
 
 ## Bound partition identities
 
-The first subscript access creates a partition. Equal identities reuse it, and
-the outer bucket retains every accessed partition until the bucket is released.
-Reset clears data and pagination without removing the partition or its
-invalidation subscriptions.
+A bucket retains every accessed partition until released. Equal keys reuse the
+same partition. Reset clears its data, but does not evict it or stop its
+invalidation subscriptions. There is no automatic eviction.
 
-Prefer bounded identities such as a small set of query variants. Arbitrary
-search strings, timestamps, or ever-changing cursors can grow a long-lived
-bucket's partition storage indefinitely. There is no automatic eviction API;
-scope such a repository to a search/session lifetime when appropriate.
+Prefer bounded identities. Scope repositories using arbitrary search strings
+or other unbounded keys to a session lifetime. A selected partition can outlive
+its outer bucket when another owner retains it.
 
-An external reference to a selected partition can keep it alive after its
-outer bucket is released. An active update observation also retains its
-sources until termination.
+## Own observations deliberately
 
-## Cancel observation tasks
+| Resource | Lifetime |
+| --- | --- |
+| Bucket or partition iterator | Owns an independent observation and retains its source until cancelled or released. |
+| Composition iterator | Retains the composition and subscribes to its shared outcome. Ending one iterator does not stop others. |
+| Sequence input | One subscription per composition; cancelled when the composition is released or the subscription restarts. |
+| Relationship input | Retains lookup values and observes partitions while their keys are required. Releasing the composition cancels dependent tasks. |
 
-Direct bucket and partition iterators create independent observations. Cancelling
-or releasing an iterator ends its observation and releases the retained source.
-Composition iterators subscribe independently to one shared observable outcome;
-the composition keeps observing for its own lifetime.
+Reusing a declaration creates independent composition state. A sequence factory
+must produce a usable sequence each time; returning one single-consumer stream
+does not make it a broadcast source. Native relationship partitions remain owned
+by their bucket after they leave the root.
 
-Sequence inputs belong to their composition, not to any one consumer. Releasing
-one consumer does not stop the other consumers or upstream subscriptions.
-Releasing the composition cancels upstream iteration; cancellation remains
-cooperative for external sequences. Restarting a sequence input cancels its
-previous iterator and prevents its late results from replacing current state.
+Avoid closures that capture an owner which itself retains the composition.
+External operations must cooperate with cancellation to stop promptly;
+obsolete results are prevented from publishing.
 
-Each composition materializes its own sequence inputs. Reusing one `Input`
-declaration in two compositions creates two subscriptions. The factory must
-provide a usable sequence each time; returning the same single-consumer stream
-does not turn it into a broadcast source.
+## Account for costs
 
-Emitted updates use an unbounded buffer. A consumer that processes results more
-slowly than observation emits them retains older snapshots. This preserves
-already emitted results and reset transitions; changing to latest-only
-buffering would change that delivery contract.
+Iteration uses unbounded buffering to preserve already emitted results and
+reset transitions. Slow consumers can retain old snapshots. Observation may
+coalesce changes and is not a mutation log; equal results may repeat.
 
-Observation may coalesce changes made before it resumes. These streams are
-current-state observation, not a durable log of every mutation. Starting a
-retry clears the old failure and exposes either retained data or unavailable
-state; ordinary bucket loading bookkeeping does not duplicate a successful
-result. Compositions may emit repeated equal results after explicit loads.
+Indexed snapshots are arrays: individual lookup scans them, and normalization
+builds an index-to-position dictionary. Profile representative snapshots in a
+Release build before introducing additional caches or indexes.
 
-## Measure indexed snapshots
-
-`IndexedKey` stores an ordered array. Lookup scans that array; normalization
-builds an index-to-position dictionary and a normalized result. Store/remove
-also normalize input, and the bucket normalizes their output to support custom
-key spaces. These operations can matter for large snapshots or repeated lookup
-inside rendering loops.
-
-Profile representative snapshots in a Release build before adding auxiliary
-indexes or caches. Include mutation and normalization costs as well as lookup
-time, and account for snapshots retained by slow asynchronous consumers.
-
-Next: [Partitioning buckets](partitioning.md) ·
-[Live compositions](composition.md)
+Next: [Partitioning](partitioning.md) · [Compositions](composition.md)

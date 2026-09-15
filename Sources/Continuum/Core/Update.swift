@@ -261,7 +261,7 @@ where Scope == UnpartitionedBucketScope {
     }
 }
 
-extension BucketPartition: UpdateSource {
+extension BucketPartition: UpdateSource, CompositionResetSource {
     public func _latestUpdateForObservation() -> Update<Space.Snapshot> {
         latestUpdate
     }

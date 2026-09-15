@@ -74,36 +74,11 @@ nonisolated public struct NextPage<
         self.operation = operation
         merge = { current, incoming in
             var result = incoming
-            result[keyPath: collection] = mergedValues(
-                current[keyPath: collection],
-                incoming[keyPath: collection],
-                indexedBy: index
+            result[keyPath: collection] = orderedUniqueValues(
+                current[keyPath: collection] + incoming[keyPath: collection],
+                indexedBy: { $0[keyPath: index] }
             )
             return result
         }
     }
-}
-
-nonisolated private func mergedValues<
-    Element: Sendable,
-    Index: Hashable & Sendable
->(
-    _ current: [Element],
-    _ incoming: [Element],
-    indexedBy index: KeyPath<Element, Index>
-) -> [Element] {
-    var positions: [Index: Int] = [:]
-    var result: [Element] = []
-
-    for value in current + incoming {
-        let valueIndex = value[keyPath: index]
-        if let position = positions[valueIndex] {
-            result[position] = value
-        } else {
-            positions[valueIndex] = result.endIndex
-            result.append(value)
-        }
-    }
-
-    return result
 }

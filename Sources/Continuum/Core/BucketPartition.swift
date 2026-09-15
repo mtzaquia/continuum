@@ -130,6 +130,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private var paginationState = PaginationState()
 
     private(set) var latestUpdate: Update<Space.Snapshot> = .reset
+    private(set) var compositionResetRevision: UInt = 0
 
     @ObservationIgnored
     private let localSources: [LocalSource<Space>]
@@ -569,12 +570,16 @@ private extension BucketPartition {
 
     private func publishStreamState(changes: () -> Void) {
         changes()
+        let previous = latestUpdate
         latestUpdate = if let error = loadState.error {
             .result(.failure(error))
         } else if loadState.isLoaded, let snapshot {
             .result(.success(snapshot))
         } else {
             .reset
+        }
+        if case .reset = latestUpdate, case .result = previous {
+            compositionResetRevision &+= 1
         }
     }
 
@@ -1239,16 +1244,11 @@ private extension BucketPartition {
 
     func supersedeSourceWork() {
         inFlight?.task.cancel()
-        nextPageInFlight?.task.cancel()
         _ = nextGeneration()
         inFlight = nil
         completedFlight = nil
         remoteContinuationGeneration = nil
-        nextPageInFlight = nil
-        completedNextPageFlight = nil
-        paginationState = PaginationState(
-            hasNextPage: paginationCheckpoint.continuation != nil
-        )
+        cancelNextPageWork()
     }
 
     func publishCached(_ snapshot: Space.Snapshot, generation: UInt) {
@@ -1384,13 +1384,6 @@ private extension BucketPartition {
                 namespace: keySpace.namespace
             )
             recordPaginationError(error)
-            continuumDebug(
-                .operationFailed(
-                    logIdentity,
-                    operation: "next-page",
-                    error: error
-                )
-            )
             throw error
         }
 
@@ -1415,33 +1408,12 @@ private extension BucketPartition {
             return try await resolveNextPage(current)
         }
 
-        guard case .available(let continuation) = paginationCheckpoint else {
+        guard case .available(let continuation) = paginationCheckpoint,
+              let establishedSnapshot = snapshot else {
             let error = ContinuumError.initialPageNotLoaded(
                 namespace: keySpace.namespace
             )
             recordPaginationError(error)
-            continuumDebug(
-                .operationFailed(
-                    logIdentity,
-                    operation: "next-page",
-                    error: error
-                )
-            )
-            throw error
-        }
-
-        guard let establishedSnapshot = snapshot else {
-            let error = ContinuumError.initialPageNotLoaded(
-                namespace: keySpace.namespace
-            )
-            recordPaginationError(error)
-            continuumDebug(
-                .operationFailed(
-                    logIdentity,
-                    operation: "next-page",
-                    error: error
-                )
-            )
             throw error
         }
 
@@ -1630,6 +1602,7 @@ private extension BucketPartition {
     }
 
     func recordPaginationError(_ error: any Error) {
+        continuumDebug(.operationFailed(logIdentity, operation: "next-page", error: error))
         paginationState = PaginationState(
             hasNextPage: paginationCheckpoint.continuation != nil,
             error: error
@@ -1646,7 +1619,7 @@ extension BucketPartition: AsyncSequence {
     ///
     /// Initial unavailability is silent. Each iterator has an independent,
     /// unbounded buffer and retains the partition until cancelled or released.
-    /// Changes may coalesce, matching ``updates()``.
+    /// Changes may coalesce; iteration observes current outcomes rather than a mutation log.
     nonisolated public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(observation: makeSourceObservation(self))
     }

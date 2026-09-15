@@ -1,152 +1,65 @@
 # Partition a bucket
 
-Partitioning lets one typed key own several independently loaded snapshots.
-Use it for stable query variants that share a model and index shape, such as
-buying and selling accounts.
-
-## Introduce the partition once
-
-Keep the key focused on snapshot shape and model identity:
+Use partitions when the same snapshot shape has independent identities, such as
+accounts for different purposes or an author selected by ID.
 
 ```swift
-import Continuum
-
-nonisolated struct Account: Identifiable, Sendable {
-  let id: Int
-  let name: String
-}
-
-enum AccountsData {
-  static let all = IndexedKey<Account.ID, Account>("accounts")
-}
-```
-
-Pass the stable query type to `partitionedBy:`. The configuration receives the
-partition value once; source operations capture that value and retain their
-ordinary zero-argument shape:
-
-```swift
-import Observation
-
 nonisolated enum Purpose: Hashable, Sendable {
-  case buy
-  case sell
+  case buy, sell
 }
 
-@MainActor
-@Observable
-final class AccountsRepository {
-  let accounts: PartitionedIndexedBucket<
-    Purpose,
-    Account.ID,
-    Account
-  >
-
-  init(database: Database, client: APIClient) {
-    accounts = Bucket(
-      AccountsData.all,
-      partitionedBy: Purpose.self
-    ) { purpose in
-      LocalSource {
-        try await database.accounts(purpose: purpose)
-      }
-      RemoteSource {
-        try await client.accounts(purpose: purpose)
-      }
-    }
-  }
+let accounts = Bucket(
+  IndexedKey<Account.ID, Account>("accounts"),
+  partitionedBy: Purpose.self
+) { purpose in
+  LocalSource { try await database.accounts(purpose: purpose) }
+  RemoteSource { try await client.accounts(purpose: purpose) }
 }
-```
 
-Partition values must be `Hashable` and `Sendable`. In a target whose default
-isolation is `MainActor`, declaring a value-only partition type `nonisolated`
-also keeps its `Hashable` conformance available to sendable source operations.
-
-## Work through a selected partition
-
-Subscript the outer bucket with a partition value before loading, reading, or
-mutating:
-
-```swift
-let buying = repository.accounts[.buy]
-let selling = repository.accounts[.sell]
-
+let buying = accounts[.buy]
 try await buying.load()
-
-buying.isLoaded
-buying.values
-buying.latest
-buying[accountID]
-
-try await buying.store(account)
-try await selling.remove(accountID)
+print(buying.values)
 ```
 
-The first access creates a partition lazily. Repeated access with an equal value
-returns the same observable `BucketPartition`, preserving its snapshot, loading
-state, errors, and in-flight work.
+The first access creates a `BucketPartition`. Equal keys return the same
+partition. Each owns its values, errors, source work, persistence, and pagination.
+A load or reset of `.buy` does not affect `.sell`.
 
-Each partition is one atomic list:
+`IndexedKey` uses an identifiable model's `id`. For a different index, pass
+`indexedBy: \.code` or a sendable closure. Stored key-path variables must retain
+`& Sendable` in their declared type.
 
-- A successful empty `.buy` result makes `accounts[.buy].isLoaded` true without
-  loading `.sell`.
-- Cached loads without memory coalesce within the same partition; repeated
-  remote loads are latest-wins.
-- Different partitions can load concurrently.
-- Store, remove, and reset affect only the selected partition.
-- Indexed ordering and duplicate normalization apply independently inside each
-  partition.
-- Paginated partitions retain independent cursors, continuation state, and
-  coalesced next-page work.
-
-Loading policies also apply independently. A remote `.buy` load supersedes
-active `.buy` work without cancelling `.sell`; see
-[Loading snapshots](loading.md).
-
-The outer bucket intentionally has no aggregate `isLoaded` or `values`.
-Completeness is meaningful only for a selected partition.
+Partition keys must be `Hashable & Sendable`. Use a single query struct when
+several fields identify a snapshot; authentication or tracing context belongs
+in the captured dependencies. Value-only domain types should be `nonisolated`
+in projects with default main-actor isolation.
 
 ## Observe and compose selected partitions
 
-A selected partition exposes `latest: Update<Snapshot>` and can be iterated
-directly, with the same result/reset cases as a bucket or composition:
-
 ```swift
-for await update in repository.accounts[.buy] {
-  // Handle the current result or a reset.
-}
+for await update in accounts[.buy] { /* Handle Update<[Account]>. */ }
 
 let comparison = Composition {
-  Input(repository.accounts[.buy])
-  Input(repository.accounts[.sell]).optional()
+  Input(accounts[.buy])
+  Input(accounts[.sell]).optional()
 } transform: { buying, selling in
   buying.count + (selling?.count ?? 0)
 }
 ```
 
-The outer partitioned bucket has no single `latest` outcome or async sequence;
-select the partitions that belong in the composition. These inputs observe
-without loading. Attach loading actions when the composition should request
-loads. See [Live compositions](composition.md) for required and optional inputs.
+Select a partition before reading `latest` or iterating: the outer bucket has no
+combined outcome. The example inputs observe only; attach loading closures to
+make them participate in composition loads.
 
-## Keep partitioning flat
+For partitions selected by entries in another collection, use
+`Input(posts).resolving(\.authorID, from: authors)`. Resolved snapshots can be
+single values or collections. [Relationship resolution →](composition.md#resolve-relationships)
 
-The initializer accepts one partition type, so a bucket has exactly one flat
-partition dimension. Its `BucketBuilder` contains source and invalidation
-capabilities rather than structural partition declarations. Use a single
-`Hashable` query value when several request fields jointly identify a list:
+## Bound partition identities
 
-```swift
-nonisolated struct AccountsQuery: Hashable, Sendable {
-  let purpose: Purpose
-  let region: Region
-  let sort: AccountSort
-}
-```
+The outer bucket retains every accessed partition until released. Reset clears
+data without evicting partitions or stopping their invalidation subscriptions.
+Prefer bounded identities, or scope repositories using arbitrary queries to a
+session lifetime. [Ownership details →](resource-lifetime.md)
 
-Authentication, tracing, and other request context that does not identify a
-cached list remains captured by the repository's dependencies rather than
-becoming part of the partition value.
-
-Next: [Loading snapshots](loading.md) · [Paginating buckets](pagination.md) ·
-[Live compositions](composition.md) · [Resource lifetime](resource-lifetime.md)
+Next: [Loading](loading.md) · [Compositions](composition.md)

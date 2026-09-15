@@ -28,7 +28,7 @@
 @MainActor
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
-    let loads: [@MainActor @Sendable (LoadPolicy) async -> Void]
+    let load: (@MainActor @Sendable (LoadPolicy) async -> Void)?
     private var materialize: (@MainActor () -> Input<Value>)? = nil
 
     /// Observes a bucket, selected partition, or composition without loading it.
@@ -73,7 +73,7 @@ public struct Input<Value: Sendable> {
         self.init(read: {
             .init(value: read(), unavailable: false,
                   failures: loader.error.map { [$0] } ?? [])
-        }, loads: [{ policy in await loader.run(policy) }])
+        }, load: { policy in await loader.run(policy) })
     }
 
     /// Bridges a sequence of results into the composition's required inputs.
@@ -90,31 +90,27 @@ public struct Input<Value: Sendable> {
     /// and errors are ignored. Releasing the composition cancels its subscription.
     ///
     /// - Parameters:
-    ///   - updates: Creates a fresh sequence of results for each subscription.
+    ///   - updates: Creates a fresh sendable sequence of results for each subscription.
     ///   - subscriptionOnLoad: Whether loading preserves or replaces the subscription.
     ///   - load: An optional action receiving the composition's loading policy.
-    public init<Source: AsyncSequence, Failure: Error>(
+    public init<Source: AsyncSequence & Sendable, Failure: Error>(
         updates: @escaping @MainActor () -> Source,
         subscriptionOnLoad: InputSubscriptionBehavior = .keep,
         load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
-    ) where Source.Element == Result<Value, Failure>,
-          Source.AsyncIterator: SendableMetatype {
+    ) where Source.Element == Result<Value, Failure> {
         self.init(read: { .init(value: nil, unavailable: true, failures: []) }, materialize: {
             let state = SequenceInputState<Value>(updates)
             state.subscribe()
             let loader = CompositionLoad { policy in
                 if case .restart = subscriptionOnLoad { state.subscribe() }
-                let subscription = state.generation
-                await state.waitUntilSubscribed()
-                try Task.checkCancellation()
-                guard state.generation == subscription else { throw CancellationError() }
+                try await state.waitUntilSubscribed()
                 try await load?(policy)
             }
-            let actions: [@MainActor @Sendable (LoadPolicy) async -> Void]
+            let action: (@MainActor @Sendable (LoadPolicy) async -> Void)?
             if load != nil || subscriptionOnLoad == .restart {
-                actions = [{ policy in await loader.run(policy) }]
+                action = { policy in await loader.run(policy) }
             } else {
-                actions = []
+                action = nil
             }
             return Input(read: {
                 if let error = loader.error {
@@ -128,7 +124,7 @@ public struct Input<Value: Sendable> {
                 case nil:
                     return .init(value: nil, unavailable: true, failures: [])
                 }
-            }, loads: actions)
+            }, load: action)
         })
     }
 
@@ -150,16 +146,20 @@ public struct Input<Value: Sendable> {
                              failures: loadError.map { [$0] } ?? [], resetRevision: resetRevision)
             }
         }
-        loads = loader.map { loader in [{ policy in await loader.run(policy) }] } ?? []
+        if let loader {
+            load = { policy in await loader.run(policy) }
+        } else {
+            load = nil
+        }
     }
 
     init(
         read: @escaping @MainActor () -> CompositionInputState<Value>,
-        loads: [@MainActor @Sendable (LoadPolicy) async -> Void] = [],
+        load: (@MainActor @Sendable (LoadPolicy) async -> Void)? = nil,
         materialize: (@MainActor () -> Input<Value>)? = nil
     ) {
         self.read = read
-        self.loads = loads
+        self.load = load
         self.materialize = materialize
     }
 
@@ -179,7 +179,7 @@ public struct Input<Value: Sendable> {
             let state = read()
             return .init(value: .some(state.failures.isEmpty ? state.value : nil),
                          unavailable: false, failures: [])
-        }, loads: loads, materialize: factory)
+        }, load: load, materialize: factory)
     }
 
     /// Relaxes an already-optional input without adding another optional layer.
@@ -195,14 +195,14 @@ public struct Input<Value: Sendable> {
             let state = read()
             let value: Wrapped? = state.failures.isEmpty ? (state.value ?? nil) : nil
             return .init(value: .some(value), unavailable: false, failures: [])
-        }, loads: loads, materialize: factory)
+        }, load: load, materialize: factory)
     }
 }
 
 /// Typed inputs accumulated by ``CompositionBuilder``.
 @MainActor
 public struct CompositionInputs<each Value: Sendable> {
-    let inputs: (repeat Input<each Value>)
+    let makeInputs: @MainActor () -> (repeat Input<each Value>)
 }
 
 /// Builds a fixed list of typed dependencies, selecting branches at construction.
@@ -214,7 +214,7 @@ public struct CompositionInputs<each Value: Sendable> {
 public enum CompositionBuilder {
     /// Adds one snapshot or observable expression.
     public static func buildExpression<T>(_ input: Input<T>) -> CompositionInputs<T> {
-        .init(inputs: input)
+        .init(makeInputs: { input.resolved() })
     }
 
     /// Starts a list of inputs.
@@ -227,7 +227,11 @@ public enum CompositionBuilder {
         accumulated: CompositionInputs<repeat each A>,
         next: CompositionInputs<repeat each B>
     ) -> CompositionInputs<repeat each A, repeat each B> {
-        .init(inputs: (repeat each accumulated.inputs, repeat each next.inputs))
+        .init(makeInputs: {
+            let a = accumulated.makeInputs()
+            let b = next.makeInputs()
+            return (repeat each a, repeat each b)
+        })
     }
 
     /// Selects the first branch with a matching output shape.
@@ -245,9 +249,12 @@ public enum CompositionBuilder {
         _ component: CompositionInputs<repeat each T>?
     ) -> CompositionInputs<repeat (each T)?> {
         if let component {
-            return .init(inputs: (repeat (each component.inputs).optional()))
+            return .init(makeInputs: {
+                let inputs = component.makeInputs()
+                return (repeat (each inputs).optional())
+            })
         }
-        return .init(inputs: (repeat absent((each T).self)))
+        return .init(makeInputs: { (repeat absent((each T).self)) })
     }
 
     private static func absent<T: Sendable>(_: T.Type) -> Input<T?> {

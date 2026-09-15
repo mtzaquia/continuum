@@ -30,7 +30,6 @@ final class LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
     private let operations: [PersistenceOperation<Space>]
     private let logIdentity: BucketLogIdentity
     private var tail: Task<Void, Never>?
-    private var identifier: UInt = 0
 
     init(
         sources: [LocalSource<Space>],
@@ -73,8 +72,6 @@ final class LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
         operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
         let predecessor = tail
-        identifier &+= 1
-        let identifier = identifier
         // Local I/O has no main-actor work. Queue registration above is atomic
         // with bucket publication; the source closures execute off this actor.
         let task = Task { @concurrent in
@@ -82,11 +79,12 @@ final class LocalPersistenceCoordinator<Space: ContinuumKeySpace> {
             try Task.checkCancellation()
             return try await operation()
         }
-        tail = Task { @concurrent in
+        let completion = Task { @concurrent in
             _ = await task.result
         }
+        tail = completion
         defer {
-            if self.identifier == identifier { tail = nil }
+            if tail == completion { tail = nil }
         }
         // Rollback must remain able to restore disk after caller cancellation.
         // It is still ordered before every subsequently submitted operation.

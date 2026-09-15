@@ -136,20 +136,7 @@ nonisolated public struct IndexedKey<
     /// When an index appears more than once, its last value replaces the earlier
     /// value without moving the index.
     public func normalized(_ snapshot: [Value]) -> [Value] {
-        var positions: [Index: Int] = [:]
-        var result: [Value] = []
-
-        for value in snapshot {
-            let index = indexOperation(value)
-            if let position = positions[index] {
-                result[position] = value
-            } else {
-                positions[index] = result.endIndex
-                result.append(value)
-            }
-        }
-
-        return result
+        orderedUniqueValues(snapshot, indexedBy: indexOperation)
     }
 
     /// Returns the value matching one index.

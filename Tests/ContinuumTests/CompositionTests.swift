@@ -585,7 +585,7 @@ private func isFailure<T>(_ update: Update<T>?) -> Bool {
 private struct NumberedError: Error { let number: Int }
 
 
-private func firstUpdate<Source: AsyncSequence>(_ source: Source) async throws -> Update<Int>?
+@concurrent private func firstUpdate<Source: AsyncSequence & Sendable>(_ source: Source) async throws -> Update<Int>?
 where Source.Element == Update<Int> {
     for try await update in source { return update }
     return nil
