@@ -106,8 +106,11 @@ may repeat, and buffering is unbounded. [Ownership and buffering →](resource-l
 Pair `.resolving` with an array input when its entries identify required data:
 
 ```swift
-let authors = Bucket(Key<Author>("authors"), partitionedBy: Author.ID.self) { id in
-  RemoteSource { try await client.author(id: id) }
+let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
+  RemoteSource {
+    Load { try await client.authors() }
+    LoadEntry { id in try await client.author(id: id) }
+  }
 }
 
 let feed = Composition {
@@ -123,14 +126,22 @@ let feed = Composition {
 ```
 
 This contributes **two parameters**: `[Post]` and `[Author.ID: Author]`.
-Continuum deduplicates keys, loads their partitions concurrently, and delivers
+Continuum deduplicates keys, loads their entries concurrently, and delivers
 the root and complete dictionary together. A previous complete pair may remain
 visible while its replacement resolves. Empty roots supply an empty dictionary.
 Dictionary subscripts still return Swift optionals.
 
-Selected partitions stay observed, so stores, removals, external loads, failures,
-and recovery update the pair. Partition snapshots can also be collections;
-resolution uses the existing bucket loading and storage behavior.
+Resolution uses [entry loading](loading.md#load-one-indexed-entry): existing
+entries stay observed; missing entries are fetched without changing the list.
+The composition retains the latest observed value while its key is needed,
+including after removal from the list. Resetting the bucket invalidates it.
+Entry failures affect the composition, not the list, and remain until a successful
+relationship load or reset. Collection edits alone do not clear load errors.
+
+`from:` also accepts an explicitly selected indexed partition. Partition keys
+select a collection (such as a search query); foreign keys select its entries.
+A cached entry needs no loader. Fetching without `LoadEntry` produces
+`ContinuumError.missingEntrySource`, which fails the required relationship.
 
 ### Use a one-shot lookup
 
@@ -156,9 +167,9 @@ or live observation. This bridge has no cache configuration or TTL.
 | --- | --- |
 | Explicit composition load | Finish the root action, then resolve all required keys with the same policy. |
 | Available root at construction, or a changed root | Resolve newly introduced keys with `.cached`; retain values for continuing keys. Failed one-shot lookups are retryable. |
-| Keys leave the root | Discard their derived values and stop observing their partitions. The bucket still owns accessed partitions. |
+| Keys leave the root | Discard their derived values and stop observing their sources. |
 | Root reset | Clear the pair and discard retained relationship values. |
-| Required partition reset | Invalidate the pair; wait for explicit loading or externally established data. |
+| Related bucket reset | Invalidate the pair; wait for explicit loading or externally established data. |
 
 For `.cachedThenRemote`, relationships follow the completed root refresh.
 `loadNext()` changes an array root through ordinary observation; no special
@@ -171,8 +182,8 @@ cancellation cancels that load's dependent tasks. Native bucket flights retain
 their shared-work cancellation rules and remain independently observable.
 
 The root must be `Input<[Element]>`. Elements and resolved values are sendable;
-keys are `Hashable & Sendable`, and key paths must preserve sendability. Native
-partition keys must match the foreign-key type. One relationship per declaration
+keys are `Hashable & Sendable`, and key paths must preserve sendability. The
+related collection's index must match the foreign-key type. One relationship per declaration
 is supported; chaining and `.optional()` on the pair are not. A conditional
 builder block can make both parameters optional.
 

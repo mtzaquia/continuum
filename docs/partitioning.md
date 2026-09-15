@@ -1,7 +1,7 @@
 # Partition a bucket
 
 Use partitions when the same snapshot shape has independent identities, such as
-accounts for different purposes or an author selected by ID.
+account lists for different purposes or pages for different search queries.
 
 ```swift
 nonisolated enum Purpose: Hashable, Sendable {
@@ -51,9 +51,10 @@ Select a partition before reading `latest` or iterating: the outer bucket has no
 combined outcome. The example inputs observe only; attach loading closures to
 make them participate in composition loads.
 
-For partitions selected by entries in another collection, use
-`Input(posts).resolving(\.authorID, from: authors)`. Resolved snapshots can be
-single values or collections. [Relationship resolution →](composition.md#resolve-relationships)
+Use [entry loading](loading.md#load-one-indexed-entry) to fetch an individual
+entity from an indexed collection. For
+[relationship resolution](composition.md#resolve-relationships), pass the indexed
+bucket or select a query partition explicitly; foreign keys identify entries.
 
 ## Bound partition identities
 

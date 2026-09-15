@@ -100,7 +100,7 @@ relationships from a collection's keys. Iteration itself never starts a load.
 
 | I want to… | Read |
 | --- | --- |
-| Choose cache and refresh behavior | [Loading](docs/loading.md) |
+| Load snapshots or individual indexed entries | [Loading](docs/loading.md) |
 | Combine values, streams, and relationships | [Compositions](docs/composition.md) |
 | Keep independent snapshots for different keys | [Partitioning](docs/partitioning.md) |
 | Save snapshots to local storage | [Persistence](docs/persistence.md) |

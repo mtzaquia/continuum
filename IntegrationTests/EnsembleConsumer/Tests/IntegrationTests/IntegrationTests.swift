@@ -41,12 +41,15 @@ struct IntegrationTests {
 
     @MainActor @Test func relationshipResetFailureAndRetry() async throws {
         let service = RelationshipService()
-        let names = Bucket(Key<String>("ensemble.names"), partitionedBy: Int.self) { id in
-            RemoteSource { try await service.name(id) }
+        let names = Bucket(IndexedKey<Int, NamedEntry>("ensemble.names")) {
+            RemoteSource {
+                Load { [NamedEntry]() }
+                LoadEntry { id in NamedEntry(id: id, name: try await service.name(id)) }
+            }
         }
         let child = Composition {
             Input { [1] }.resolving(\.self, from: names)
-        } transform: { _, names in names[1] ?? "" }
+        } transform: { _, names in names[1]?.name ?? "" }
         let composition = Composition {
             Input(child) { policy in await child.load(using: policy) }
         } transform: { $0 }
@@ -66,7 +69,7 @@ struct IntegrationTests {
             if case .result(.success("name-1")) = update { break }
         }
         if case .available("name-1") = data.latestValue {} else { Issue.record("Expected resolved name") }
-        try await names[1].reset()
+        try await names.reset()
         await service.setFailure(true)
         await composition.load(using: .remote)
         var sawReset = false
@@ -144,3 +147,5 @@ private actor RelationshipService {
         return "name-\(id)"
     }
 }
+
+private nonisolated struct NamedEntry: Identifiable, Sendable { let id: Int; let name: String }

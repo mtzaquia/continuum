@@ -33,28 +33,39 @@ public struct ResolvedInput<Element: Sendable, ID: Hashable & Sendable, Resolved
 }
 
 public extension Input {
-    /// Resolves and observes the partition selected by each distinct foreign key.
+    /// Resolves foreign keys through an indexed bucket's entry loader.
     ///
-    /// Explicit loads finish the root action before loading selected partitions
-    /// with the same policy. New keys introduced by observation use `.cached`.
-    /// All required snapshots must be available before the root and dictionary
-    /// reach the transform together. Selected partitions remain live; resets and
-    /// failures propagate through the composition, and subsequent values recover.
-    ///
+    /// Existing entries remain observable. Out-of-list results are retained only
+    /// by this composition while needed, without inserting them into the bucket.
+    /// Resetting the bucket invalidates both. Explicit loads forward their policy;
+    /// new keys use `.cached`. Entry failures fail the relationship, not the list,
+    /// and remain until a successful relationship load or reset. Collection edits
+    /// update retained values without clearing load errors.
     /// - Parameters:
-    ///   - key: The foreign key on each root entry. Stored key paths must be sendable.
-    ///   - bucket: The partitioned bucket owning the related snapshots.
-    /// - Returns: A declaration contributing the array and `[ID: Space.Snapshot]`.
-    func resolving<Element: Sendable, ID: Hashable & Sendable, Space: ContinuumKeySpace>(
+    ///   - key: The foreign key on each root entry.
+    ///   - bucket: The indexed collection with an optional ``LoadEntry`` capability.
+    /// - Returns: A declaration contributing the root array and `[ID: Related]`.
+    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable>(
         _ key: KeyPath<Element, ID> & Sendable,
-        from bucket: Bucket<Space, PartitionedScope<ID>>
-    ) -> ResolvedInput<Element, ID, Space.Snapshot> where Value == [Element] {
+        from bucket: IndexedBucket<ID, Related>
+    ) -> ResolvedInput<Element, ID, Related> where Value == [Element] {
+        resolving(key, from: bucket.storage)
+    }
+
+    /// Resolves foreign keys through one selected indexed partition.
+    ///
+    /// Shares the indexed bucket overload's retention, observation, and reset rules.
+    /// - Parameters:
+    ///   - key: The foreign key on each root entry.
+    ///   - partition: The indexed partition owning the entry loader.
+    /// - Returns: A declaration contributing the root array and `[ID: Related]`.
+    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable>(
+        _ key: KeyPath<Element, ID> & Sendable,
+        from partition: BucketPartition<IndexedKey<ID, Related>>
+    ) -> ResolvedInput<Element, ID, Related> where Value == [Element] {
         .init(root: self, key: key, select: { id in
-            let partition = bucket[id]
-            let input = Input<Space.Snapshot>(partition)
-            return RelationshipSource(read: input.read, load: { policy in
-                try await partition.load(using: policy)
-            })
+            let entry = EntryRelationshipState(partition: partition, id: id)
+            return RelationshipSource(read: { entry.read() }, load: { try await entry.load($0) })
         })
     }
 

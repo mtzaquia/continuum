@@ -145,6 +145,9 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private let logIdentity: BucketLogIdentity
 
     @ObservationIgnored
+    private var entryTasks: [Space.Input: Task<Space.Value, any Error>] = [:]
+
+    @ObservationIgnored
     private var inFlight: InFlight?
 
     @ObservationIgnored
@@ -236,6 +239,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     }
 
     deinit {
+        for task in entryTasks.values { task.cancel() }
         inFlight?.task.cancel()
         nextPageInFlight?.task.cancel()
         for task in mutationTasks.values {
@@ -654,10 +658,18 @@ private extension BucketPartition {
     }
 
     private func enqueue(_ mutation: Mutation) async throws {
+        try await enqueue(kind: mutation.logKind) { [self] epoch in
+            try await perform(mutation, epoch: epoch)
+        }
+    }
+
+    private func enqueue(
+        kind: BucketMutationKind,
+        operation: @escaping @MainActor (UInt) async throws -> Void
+    ) async throws {
         try await ContinuumLogContext.withOperation {
             let epoch = mutationEpoch
             let predecessor = mutationTail
-            let kind = mutation.logKind
             continuumDebug(
                 .mutationRequested(
                     logIdentity,
@@ -679,7 +691,7 @@ private extension BucketPartition {
                     throw CancellationError()
                 }
 
-                try await perform(mutation, epoch: epoch)
+                try await operation(epoch)
             }
             mutationTail = task
             mutationTasks[identifier] = task
@@ -749,6 +761,7 @@ private extension BucketPartition {
                 resetsPagination = true
             }
 
+            if resetsPagination, case .reset = latestUpdate { compositionResetRevision &+= 1 }
             publishMutation(updated)
             if resetsPagination {
                 clearPagination()
@@ -804,6 +817,25 @@ private extension BucketPartition {
                 ownership: ownership,
                 restoring: resetsPagination ? previousPaginationCheckpoint : nil
             )
+            throw error
+        }
+    }
+
+    private func replaceEntry(_ value: Space.Value, ownership: MutationOwnership) async throws {
+        try requireCurrent(ownership)
+        let id = keySpace.input(for: value)
+        guard let previous = snapshot, keySpace.value(for: id, in: previous) != nil else { return }
+        // A pending page captured an older collection. Keep its cursor for retry.
+        cancelNextPageWork()
+        let updated = keySpace.normalized(keySpace.storing(value, in: previous))
+        do {
+            try await persistence.persist(updated)
+            try requireCurrent(ownership)
+            publishStreamState { storedSnapshot = .present(updated) }
+        } catch {
+            if ownsState(ownership) {
+                try? await persistence.persist(previous, restoring: true)
+            }
             throw error
         }
     }
@@ -948,6 +980,13 @@ private extension BucketPartition {
         }
 
         try Task.checkCancellation()
+        if !LoadPolicy.remote.replacesActiveLoad {
+            try await waitForMutations()
+            if let current = inFlight {
+                let outcome = try await resolve(current)
+                if outcome.origin == .remote { return outcome.snapshot }
+            }
+        }
         logSupersededWork(replacement: "remote-load")
         supersedeMutations()
         supersedeSourceWork()
@@ -1238,6 +1277,8 @@ private extension BucketPartition {
     }
 
     func nextGeneration() -> UInt {
+        for task in entryTasks.values { task.cancel() }
+        entryTasks.removeAll()
         generation &+= 1
         return generation
     }
@@ -1640,5 +1681,66 @@ extension BucketPartition: AsyncSequence {
         @concurrent public mutating func next() async -> Element? {
             await iterator.next()
         }
+    }
+}
+
+public extension BucketPartition {
+    /// Loads one entry, replacing and persisting it only if already in the collection.
+    ///
+    /// `.cached` returns an existing entry; other policies fetch remotely. Fetches
+    /// for the same ID share work except `.remote`, which replaces earlier work.
+    /// Missing entries are returned without insertion
+    /// or persistence. Ordering, pagination, and whole-list loading state are preserved.
+    /// Resets and superseding collection operations cancel pending entry loads.
+    ///
+    /// - Parameters:
+    ///   - id: The index to load.
+    ///   - policy: Whether an existing entry may satisfy the request. Defaults to `.cached`.
+    /// - Returns: The existing or fetched entry.
+    /// - Throws: A source or persistence error, `CancellationError`, or
+    ///   ``ContinuumError`` for a missing loader or mismatched index.
+    @discardableResult
+    func load<ID, Value>(id: ID, using policy: LoadPolicy = .cached) async throws -> Value
+    where Space == IndexedKey<ID, Value> {
+        try Task.checkCancellation()
+        if policy == .cached, let value = self[id] { return value }
+        let task: Task<Value, any Error>
+        if policy.replacesActiveLoad { entryTasks[id]?.cancel() }
+        if !policy.replacesActiveLoad, let existing = entryTasks[id] {
+            task = existing
+        } else {
+            task = Task { @MainActor [weak self] in
+                try Task.checkCancellation()
+                guard let self else { throw CancellationError() }
+                try await waitForMutations()
+                if let flight = inFlight { _ = try await resolve(flight) }
+                try Task.checkCancellation()
+                if policy == .cached, let value = self[id] { return value }
+                guard let loader = remoteSource?.loadEntry else {
+                    throw ContinuumError.missingEntrySource(namespace: keySpace.namespace)
+                }
+                let generation = generation
+                let wasMember = self[id] != nil
+                let value = try await loader.operation(id)
+                try Task.checkCancellation()
+                guard self.generation == generation else { throw CancellationError() }
+                guard keySpace.input(for: value) == id else {
+                    throw ContinuumError.mismatchedEntryIdentity(namespace: keySpace.namespace)
+                }
+                if wasMember {
+                    try await enqueue(kind: .loadEntry) { [self] epoch in
+                        try await replaceEntry(value, ownership: .init(epoch: epoch, generation: generation))
+                    }
+                }
+                try Task.checkCancellation()
+                guard self.generation == generation else { throw CancellationError() }
+                return value
+            }
+            entryTasks[id] = task
+        }
+        defer { if entryTasks[id] == task { entryTasks[id] = nil } }
+        let value = try await task.value
+        try Task.checkCancellation()
+        return value
     }
 }

@@ -16,7 +16,8 @@ try await posts.store(draft)
 try await posts.remove(postID)
 ```
 
-Each capability appears at most once, in that order. Omitting one keeps the
+Each capability appears at most once, in that order. Optional `LoadEntry` goes
+before `Store` and `Remove`; see [entry loading](loading.md#load-one-indexed-entry). Omitting one keeps the
 corresponding mutation local-only. A read-only source can use
 `RemoteSource { try await client.posts() }`.
 

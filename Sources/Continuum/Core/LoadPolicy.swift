@@ -21,6 +21,10 @@
 //
 
 /// The way a load selects and refreshes an atomic snapshot.
+///
+/// For indexed entry loads, `.cached` accepts an existing entry; the other
+/// policies fetch remotely. `.remote` replaces earlier work for the same ID;
+/// other policies share it. Entry loads do not read local sources.
 public enum LoadPolicy: Sendable {
     /// Returns an established memory snapshot, then tries local sources before
     /// the remote source.
@@ -45,4 +49,9 @@ public enum LoadPolicy: Sendable {
     /// Repeated remote loads use latest-wins behavior. Results and errors from
     /// superseded source work cannot replace the current snapshot or state.
     case remote
+}
+
+internal extension LoadPolicy {
+    /// Shared replacement decision for snapshot and entry loading.
+    var replacesActiveLoad: Bool { self == .remote }
 }

@@ -9,12 +9,13 @@ suspension points.
 
 | Incoming operation | Pending work |
 | --- | --- |
-| `store` or `remove` | Waits for prior mutations, then supersedes active loads and pages. |
-| `reset` | Supersedes queued and running mutations, loads, and pages. Clears memory before awaiting local deletion. |
+| `store` or `remove` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
+| `reset` | Supersedes queued and running mutations, loads, entry fetches, and pages. Clears memory before awaiting local deletion. |
 | `.cached` with memory | Returns the current snapshot immediately, including optimistic values. |
 | `.cached` without memory | Waits for pending mutations/reset, rechecks memory, then shares or starts a load. |
 | `.cachedThenRemote` | Waits for pending mutations/reset, then shares or starts a load that reaches remote. |
-| `.remote` | Supersedes queued and running mutations, loads, and pages. |
+| `.remote` | Supersedes queued and running mutations, loads, entry fetches, and pages. |
+| `load(id:using:)` | Cached hits return immediately. Otherwise waits for mutations and initial loading, then shares work per ID unless `.remote` replaces it. Replacements use the mutation queue and cancel pending pages, preserving the cursor for retry. |
 | `loadNext()` | Waits for mutations/reset and initial loading, then coalesces requests for the current cursor. |
 
 Store reconciliation checks that it still owns the state before publishing

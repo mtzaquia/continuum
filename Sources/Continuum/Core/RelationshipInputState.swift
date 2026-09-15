@@ -142,7 +142,7 @@ final class RelationshipInputState<Element: Sendable, ID: Hashable & Sendable, R
         for (id, state) in states {
             if let previous = lastRelatedResets[id], previous != state.resetRevision {
                 resetRevision &+= 1
-                // A required partition invalidates the retained pair even when
+                // A related bucket invalidates the retained pair even when
                 // another relationship is still being resolved.
                 relatedState = .init(value: nil, unavailable: true, failures: [], resetRevision: resetRevision)
             }
@@ -176,8 +176,8 @@ final class RelationshipInputState<Element: Sendable, ID: Hashable & Sendable, R
 
     private func complete(_ results: [(ID, Result<Resolved, any Error>)]) {
         resolving = false
-        // Native partitions own their outcome, including external mutations that
-        // superseded a load. Only one-shot lookups establish data from returns.
+        // Observed entry sources own their outcome, including external changes.
+        // Only one-shot lookups establish data directly from returns.
         observeRelated()
         for (id, result) in results {
             if sources[id]?.read == nil {

@@ -22,7 +22,7 @@
 
 import Foundation
 
-/// An error raised before configured source work begins.
+/// A configuration, loading prerequisite, or source contract error.
 public enum ContinuumError: LocalizedError, Sendable {
     /// The requested key space has no remote source from which to load a
     /// snapshot.
@@ -34,9 +34,19 @@ public enum ContinuumError: LocalizedError, Sendable {
     /// The paginated key space has not loaded its initial remote page.
     case initialPageNotLoaded(namespace: String)
 
-    /// A caller-facing description of the configuration error.
+    /// The indexed bucket has no ``LoadEntry`` capability for a required fetch.
+    case missingEntrySource(namespace: String)
+
+    /// The source returned an entry whose index differs from the requested index.
+    case mismatchedEntryIdentity(namespace: String)
+
+    /// A caller-facing description of the error.
     public var errorDescription: String? {
         switch self {
+        case .missingEntrySource(let namespace):
+            "No LoadEntry is configured for data bucket \(namespace.debugDescription)."
+        case .mismatchedEntryIdentity(let namespace):
+            "LoadEntry returned a different index for data bucket \(namespace.debugDescription)."
         case .missingRemoteSource(let namespace):
             "No RemoteSource is configured for data bucket \(namespace.debugDescription)."
         case .missingPaginatedRemoteSource(let namespace):

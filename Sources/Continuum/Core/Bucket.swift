@@ -428,7 +428,7 @@ public extension Bucket where Scope: PartitionedBucketScope {
     }
 }
 
-private extension Bucket where Scope == UnpartitionedBucketScope {
+extension Bucket where Scope == UnpartitionedBucketScope {
     var storage: BucketPartition<Space> {
         guard let unpartitioned else {
             preconditionFailure("An unpartitioned bucket requires atomic storage.")
@@ -456,4 +456,21 @@ extension Bucket: AsyncSequence where Scope == UnpartitionedBucketScope {
 
 extension Bucket: CompositionResetSource where Scope == UnpartitionedBucketScope {
     var compositionResetRevision: UInt { storage.compositionResetRevision }
+}
+
+public extension Bucket where Scope == UnpartitionedBucketScope {
+    /// Loads one indexed entry, persisting a replacement only when it is already present.
+    ///
+    /// `.cached` returns an existing entry; other policies fetch remotely. Missing
+    /// entries are returned without insertion. See ``BucketPartition/load(id:using:)``.
+    /// - Parameters:
+    ///   - id: The index to load.
+    ///   - policy: The entry loading policy. Defaults to `.cached`.
+    /// - Returns: The existing or fetched entry.
+    /// - Throws: A source, persistence, configuration, identity, or cancellation error.
+    @discardableResult
+    func load<ID, Value>(id: ID, using policy: LoadPolicy = .cached) async throws -> Value
+    where Space == IndexedKey<ID, Value> {
+        try await storage.load(id: id, using: policy)
+    }
 }

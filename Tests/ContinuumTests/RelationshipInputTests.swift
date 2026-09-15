@@ -13,12 +13,18 @@ struct RelationshipInputTests {
                 return [Post(id: 1, authorID: 7), Post(id: 2, authorID: 7), Post(id: 3, authorID: 8)]
             }
         }
-        let authors = Bucket(Key<String>("authors"), partitionedBy: Int.self) { id in
-            RemoteSource { await calls.record(id); return "author-\(id)" }
+        let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            RemoteSource {
+                Load { [Author]() }
+                LoadEntry { id in
+                    await calls.record(id)
+                    return Author(id: id, name: "author-\(id)")
+                }
+            }
         }
         let composition = Composition {
             Input(posts) { try await posts.load(using: $0) }.resolving(\.authorID, from: authors)
-        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         #expect(isReset(composition.latest))
         #expect(await calls.values.isEmpty)
         await composition.load()
@@ -68,36 +74,45 @@ struct RelationshipInputTests {
         #expect(ids == [1, 2, 1])
     }
 
-    @Test("Native stores, removal, reset, failure, and recovery remain observable")
+    @Test("Entry stores, collection removal, reset, failure, and recovery remain observable")
     func nativeChanges() async throws {
         let fail = FailureSwitch()
-        let authors = Bucket(Key<String>("authors"), partitionedBy: Int.self) { _ in
-            RemoteSource { if await fail.enabled { throw LookupError.failed }; return "remote" }
+        let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            RemoteSource {
+                Load { [Author]() }
+                LoadEntry { id in
+                    if await fail.enabled { throw LookupError.failed }
+                    return Author(id: id, name: "remote")
+                }
+            }
         }
         let composition = Composition {
             Input { [Post(id: 1, authorID: 7)] }.resolving(\.authorID, from: authors)
-        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         await until { value(composition.latest)?.authors[7] == "remote" }
-        try await authors[7].store("stored")
+        try await authors.store(Author(id: 7, name: "stored"))
         await until { value(composition.latest)?.authors[7] == "stored" }
-        try await authors[7].remove()
-        await until { isReset(composition.latest) }
-        try await authors[7].store("recovered")
+        try await authors.remove(7)
+        await until { value(composition.latest)?.authors[7] == "stored" }
+        try await authors.store(Author(id: 7, name: "recovered"))
         await until { value(composition.latest)?.authors[7] == "recovered" }
-        try await authors[7].reset()
+        try await authors.reset()
         await until { isReset(composition.latest) }
         await fail.set(true)
         await composition.load(using: .remote)
         #expect(isFailure(composition.latest))
         await fail.set(false)
-        try await authors[7].load(using: .remote)
-        await until { value(composition.latest)?.authors[7] == "remote" }
+        await composition.load(using: .remote)
+        #expect(value(composition.latest)?.authors[7] == "remote")
     }
 
-    @Test("Collection-valued partitions preserve their complete snapshot type")
-    func collectionPartition() async {
-        let groups = Bucket(Key<[String]>("groups"), partitionedBy: Int.self) { id in
-            RemoteSource { ["\(id)", "extra"] }
+    @Test("Collection-valued entries preserve their underlying value type")
+    func collectionEntry() async {
+        let groups = Bucket(IndexedKey<Int, [String]>("groups", indexedBy: { Int($0[0])! })) {
+            RemoteSource {
+                Load { [[String]]() }
+                LoadEntry { (id: Int) in ["\(id)", "extra"] }
+            }
         }
         let composition = Composition {
             Input { [Post(id: 1, authorID: 7)] }.resolving(\.authorID, from: groups)
@@ -262,20 +277,23 @@ struct RelationshipInputTests {
         #expect(isFailure(try #require(await iterator.next())))
     }
 
-    @Test("Partition reset history survives recovery and nested observation")
+    @Test("Indexed bucket reset history survives recovery and nested observation")
     func nestedResetHistory() async throws {
-        let authors = Bucket(Key<String>("authors"), partitionedBy: Int.self) { _ in
-            RemoteSource { "one" }
+        let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            RemoteSource {
+                Load { [Author]() }
+                LoadEntry { id in Author(id: id, name: "one") }
+            }
         }
         let child = Composition {
             Input { [Post(id: 1, authorID: 1)] }.resolving(\.authorID, from: authors)
-        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         let parent = Composition { Input(child) } transform: { $0 }
         await until { value(parent.latest) != nil }
         var iterator = parent.makeAsyncIterator()
         _ = await iterator.next()
-        try await authors[1].reset()
-        try await authors[1].store("two")
+        try await authors.reset()
+        try await authors.store(Author(id: 1, name: "two"))
         var sawReset = false
         while let update = await iterator.next() {
             if isReset(update) { sawReset = true }
@@ -284,27 +302,33 @@ struct RelationshipInputTests {
         #expect(sawReset)
     }
 
-    @Test("Native policy selection reuses partition memory or reaches remote", arguments: [LoadPolicy.cached, .cachedThenRemote, .remote])
+    @Test("Entry policy selection reuses collection memory or reaches remote", arguments: [LoadPolicy.cached, .cachedThenRemote, .remote])
     func nativePolicies(policy: LoadPolicy) async throws {
         let calls = Calls()
-        let authors = Bucket(Key<String>("authors"), partitionedBy: Int.self) { id in
-            LocalSource { await calls.record(-id); return "local" }
-            RemoteSource { await calls.record(id); return "remote" }
+        let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            RemoteSource {
+                Load { [Author]() }
+                LoadEntry { id in
+                    await calls.record(id)
+                    return Author(id: id, name: "remote")
+                }
+            }
         }
+        try await authors.store(Author(id: 1, name: "local"))
         let source = Source<[Post]>()
         let composition = Composition {
             Input(source) { received in
                 #expect(name(received) == name(policy))
                 source.latest = .result(.success([Post(id: 1, authorID: 1)]))
             }.resolving(\.authorID, from: authors)
-        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         await composition.load(using: policy)
         switch policy {
         case .cached:
-            #expect(await calls.values == [-1])
+            #expect(await calls.values.isEmpty)
             #expect(value(composition.latest)?.authors == [1: "local"])
         case .cachedThenRemote:
-            #expect(await calls.values == [-1, 1])
+            #expect(await calls.values == [1])
             #expect(value(composition.latest)?.authors == [1: "remote"])
         case .remote:
             #expect(await calls.values == [1])
@@ -312,25 +336,31 @@ struct RelationshipInputTests {
         }
     }
 
-    @Test("A native reset during another lookup invalidates the retained pair")
+    @Test("A bucket reset during another entry lookup invalidates the retained pair")
     func resetDuringResolution() async throws {
         let root = Root([Post(id: 1, authorID: 1)])
         let gate = Gate()
-        let authors = Bucket(Key<String>("authors"), partitionedBy: Int.self) { id in
-            RemoteSource { try await gate.resolve(id, .cached) }
+        let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            RemoteSource {
+                Load { [Author]() }
+                LoadEntry { id in Author(id: id, name: try await gate.resolve(id, .cached)) }
+            }
         }
         let composition = Composition {
             Input { root.posts }.resolving(\.authorID, from: authors)
-        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         await gate.waitForCalls(1)
         gate.finish(id: 1, value: "one")
         await until { value(composition.latest) != nil }
         root.posts.append(Post(id: 2, authorID: 2))
         await gate.waitForCalls(2)
-        try await authors[1].reset()
+        try await authors.reset()
         await until { isReset(composition.latest) }
         gate.finish(id: 2, value: "two")
-        try await authors[1].store("recovered")
+        await gate.waitForReturns(2)
+        #expect(isReset(composition.latest))
+        try await authors.store(Author(id: 1, name: "recovered"))
+        try await authors.store(Author(id: 2, name: "two"))
         await until { value(composition.latest)?.authors == [1: "recovered", 2: "two"] }
     }
 
@@ -402,6 +432,7 @@ struct RelationshipInputTests {
     }
 }
 
+private nonisolated struct Author: Identifiable, Sendable { let id: Int; let name: String }
 private nonisolated struct Post: Sendable, Equatable { let id: Int; let authorID: Int }
 private nonisolated struct Pair: Sendable, Equatable { let posts: [Post]; let authors: [Int: String] }
 private enum LookupError: Error { case failed }

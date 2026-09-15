@@ -41,7 +41,7 @@ nonisolated struct RemotePageContinuation<
 /// local sources miss. Cached-then-remote loads require and always reach it,
 /// while remote loads use it directly and supersede active source work. A
 /// source can progressively disclose pagination or mutations by declaring
-/// ``Load``, ``NextPage``, ``Store``, and ``Remove`` members.
+/// ``Load``, ``NextPage``, ``LoadEntry``, ``Store``, and ``Remove`` members.
 /// Successful remote snapshots write through to every writable ``LocalSource``
 /// before entering observable memory.
 nonisolated public struct RemoteSource<
@@ -49,6 +49,7 @@ nonisolated public struct RemoteSource<
 >: Sendable {
     let operation: @Sendable () async throws -> RemoteSnapshot<Space>
     let isPaginated: Bool
+    let loadEntry: LoadEntry<Space.Input, Space.Value>?
     let store: Store<Space.Value>?
     let remove: Remove<Space.Input>?
 
@@ -64,8 +65,8 @@ nonisolated public struct RemoteSource<
 
     /// Creates an advanced remote source.
     ///
-    /// Declare one ``Load``, followed by an optional ``NextPage`` and optional
-    /// ``Store`` and ``Remove`` capabilities:
+    /// Declare one ``Load``, followed by optional ``NextPage``, ``LoadEntry``
+    /// (indexed sources only), ``Store``, and ``Remove`` capabilities:
     ///
     /// ```swift
     /// RemoteSource {
@@ -91,6 +92,7 @@ nonisolated public struct RemoteSource<
 
     init(
         load: Load<Space.Snapshot>,
+        loadEntry: LoadEntry<Space.Input, Space.Value>? = nil,
         store: Store<Space.Value>? = nil,
         remove: Remove<Space.Input>? = nil
     ) {
@@ -101,6 +103,7 @@ nonisolated public struct RemoteSource<
             )
         }
         isPaginated = false
+        self.loadEntry = loadEntry
         self.store = store
         self.remove = remove
     }
@@ -108,6 +111,7 @@ nonisolated public struct RemoteSource<
     init<Cursor: Sendable>(
         load: Load<Page<Space.Snapshot, Cursor>>,
         nextPage: NextPage<Space.Snapshot, Cursor>,
+        loadEntry: LoadEntry<Space.Input, Space.Value>? = nil,
         store: Store<Space.Value>? = nil,
         remove: Remove<Space.Input>? = nil
     ) {
@@ -119,6 +123,7 @@ nonisolated public struct RemoteSource<
             )
         }
         isPaginated = true
+        self.loadEntry = loadEntry
         self.store = store
         self.remove = remove
     }

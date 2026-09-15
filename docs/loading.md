@@ -16,6 +16,32 @@ let posts = try await repository.posts.load(using: .cachedThenRemote)
 A local `nil` is a miss; an empty collection is a hit. A local error stops the
 load. Both remote-reaching policies require a `RemoteSource`.
 
+## Load one indexed entry
+
+Add `LoadEntry` after `Load` (or `NextPage` for a paginated source):
+
+```swift
+let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
+  RemoteSource {
+    Load { try await client.authors() }
+    LoadEntry { id in try await client.author(id: id) }
+  }
+}
+
+let author = try await authors.load(id: authorID, using: .remote)
+```
+
+`.cached` returns an existing entry or fetches it. `.cachedThenRemote` and
+`.remote` fetch while keeping existing values readable. `.remote` supersedes
+earlier fetches for the same ID; other policies share work. Different IDs fetch
+concurrently. Entry loads do not scan local sources.
+
+An entry already in the collection is replaced in place and persisted before
+publication. An absent entry is returned without insertion or persistence.
+Ordering, pagination, and whole-list loading state remain unchanged. The returned
+index must match the request; errors throw without failing or changing the list.
+Reset and superseding collection operations cancel pending entry work.
+
 ## Read loading state
 
 - `isLoaded`: a complete snapshot has been established, including an empty one.

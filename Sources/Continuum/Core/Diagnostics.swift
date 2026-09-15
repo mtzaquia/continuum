@@ -80,6 +80,7 @@ nonisolated struct BucketLogIdentity: Equatable, Sendable {
 }
 
 nonisolated enum BucketMutationKind: String, Sendable {
+    case loadEntry = "load-entry"
     case store
     case remove
     case resetLocal = "reset-local"

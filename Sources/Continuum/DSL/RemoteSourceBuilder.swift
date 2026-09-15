@@ -23,8 +23,8 @@
 /// Builds the ordered capabilities of an advanced ``RemoteSource``.
 ///
 /// A source declares exactly one ``Load``. A load returning ``Page`` must be
-/// followed by one ``NextPage``. It may then declare at most one ``Store``
-/// followed by at most one ``Remove``. The fixed block shapes reject duplicate,
+/// followed by one ``NextPage``. Indexed sources may then declare ``LoadEntry``,
+/// followed by optional ``Store`` and ``Remove`` capabilities. The fixed block shapes reject duplicate,
 /// reordered, or nested capabilities.
 @resultBuilder
 nonisolated public enum RemoteSourceBuilder<
@@ -122,5 +122,81 @@ nonisolated public enum RemoteSourceBuilder<
             store: store,
             remove: remove
         )
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable>(
+        _ load: Load<Space.Snapshot>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, loadEntry: loadEntry)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable>(
+        _ load: Load<Space.Snapshot>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ store: Store<Space.Value>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, loadEntry: loadEntry, store: store)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable>(
+        _ load: Load<Space.Snapshot>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ remove: Remove<Space.Input>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, loadEntry: loadEntry, remove: remove)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable>(
+        _ load: Load<Space.Snapshot>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ store: Store<Space.Value>,
+        _ remove: Remove<Space.Input>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, loadEntry: loadEntry, store: store, remove: remove)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable, Cursor: Sendable>(
+        _ load: Load<Page<Space.Snapshot, Cursor>>,
+        _ nextPage: NextPage<Space.Snapshot, Cursor>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, nextPage: nextPage, loadEntry: loadEntry)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable, Cursor: Sendable>(
+        _ load: Load<Page<Space.Snapshot, Cursor>>,
+        _ nextPage: NextPage<Space.Snapshot, Cursor>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ store: Store<Space.Value>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, nextPage: nextPage, loadEntry: loadEntry, store: store)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable, Cursor: Sendable>(
+        _ load: Load<Page<Space.Snapshot, Cursor>>,
+        _ nextPage: NextPage<Space.Snapshot, Cursor>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ remove: Remove<Space.Input>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, nextPage: nextPage, loadEntry: loadEntry, remove: remove)
+    }
+
+    /// Adds individual entry loading to an indexed remote source.
+    public static func buildBlock<ID: Hashable & Sendable, Value: Sendable, Cursor: Sendable>(
+        _ load: Load<Page<Space.Snapshot, Cursor>>,
+        _ nextPage: NextPage<Space.Snapshot, Cursor>,
+        _ loadEntry: LoadEntry<Space.Input, Space.Value>,
+        _ store: Store<Space.Value>,
+        _ remove: Remove<Space.Input>
+    ) -> RemoteSource<Space> where Space == IndexedKey<ID, Value> {
+        RemoteSource(load: load, nextPage: nextPage, loadEntry: loadEntry, store: store, remove: remove)
     }
 }
