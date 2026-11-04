@@ -193,7 +193,7 @@ struct DiagnosticsTests {
         #expect(rendered.contains("private value") == false)
     }
 
-    @Test("Operation identifiers nest, restore, and remain unique")
+    @Test("Operation identifiers follow the build configuration")
     func operationIdentifiers() async {
         #expect(ContinuumLogContext.operationID == nil)
 
@@ -215,11 +215,19 @@ struct DiagnosticsTests {
             return ContinuumLogContext.operationID
         }
 
+        #if DEBUG
         #expect(first.0 != nil)
         #expect(first.0 == first.1)
         #expect(first.2 == "INNER-ID")
         #expect(first.0 == first.3)
         #expect(first.0 != second)
+        #else
+        #expect(first.0 == nil)
+        #expect(first.1 == nil)
+        #expect(first.2 == nil)
+        #expect(first.3 == nil)
+        #expect(second == nil)
+        #endif
         #expect(ContinuumLogContext.operationID == nil)
     }
 

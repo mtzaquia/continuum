@@ -26,8 +26,10 @@
 /// declaration order until one returns a snapshot. Returning `nil` indicates a
 /// cache miss; an empty indexed snapshot is a successful result.
 /// ``LoadPolicy/cachedThenRemote`` publishes the first local hit before
-/// continuing to the required remote source. Add a `persist:` closure to make
-/// the same source a writable destination for normalized bucket snapshots.
+/// continuing to the required remote source. Cached snapshot loads do the same
+/// when the bucket's `staleAfter` requires remote validation. Add a `persist:`
+/// closure to make the same source a writable destination for normalized bucket
+/// snapshots.
 /// Writable local sources run in declaration order. Explicit mutations publish
 /// before persistence; a failure restores their prior snapshot. The first
 /// persistence error stops the sequence. Remote loads and pages do not roll

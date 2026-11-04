@@ -41,7 +41,7 @@ nonisolated public protocol PartitionedBucketScope: BucketScope {}
 /// The scope used by a bucket partitioned by `Partition`.
 ///
 /// Callers create this scope through
-/// ``Bucket/init(_:partitionedBy:configuration:)``.
+/// ``Bucket/init(_:partitionedBy:staleAfter:configuration:)``.
 nonisolated public enum PartitionedScope<
     Value: Hashable & Sendable
 >: PartitionedBucketScope {

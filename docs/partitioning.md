@@ -25,6 +25,10 @@ The first access creates a `BucketPartition`. Equal keys return the same
 partition. Each owns its values, errors, source work, persistence, and pagination.
 A load or reset of `.buy` does not affect `.sell`.
 
+Add `staleAfter: .seconds(300)` after `partitionedBy:` to give each partition
+its own freshness interval. A refresh of `.buy` does not renew `.sell`.
+[Snapshot freshness →](loading.md#refresh-stale-snapshots)
+
 `IndexedKey` uses an identifiable model's `id`. For a different index, pass
 `indexedBy: \.code` or a sendable closure. Stored key-path variables must retain
 `& Sendable` in their declared type.

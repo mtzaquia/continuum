@@ -56,9 +56,9 @@ public struct BucketConfiguration<Space: ContinuumKeySpace>: Sendable {
 /// accepts at most one ``RemoteSource``. Any number of
 /// ``InvalidationSignal`` expressions can reset its local and in-memory state.
 /// Partitioning belongs to
-/// ``Bucket/init(_:partitionedBy:configuration:)`` rather than this capability
-/// builder. The bucket validates the accumulated remote-source count when it
-/// creates the corresponding atomic partition.
+/// ``Bucket/init(_:partitionedBy:staleAfter:configuration:)`` rather than this
+/// capability builder. The bucket validates the accumulated remote-source count
+/// when it creates the corresponding atomic partition.
 @resultBuilder
 public enum BucketBuilder<Space: ContinuumKeySpace>: Sendable {
     /// Combines the building blocks declared at one configuration level.

@@ -30,8 +30,11 @@ public enum LoadPolicy: Sendable {
     /// the remote source.
     ///
     /// An established memory snapshot returns immediately, including while
-    /// refresh work is active. Without memory, concurrent cached loads share
-    /// the same source work after pending mutations and resets complete.
+    /// refresh work is active, unless the bucket's `staleAfter` requires remote
+    /// validation. Stale or unvalidated snapshots remain readable while callers
+    /// await a shared remote refresh after pending mutations and resets finish.
+    /// Without a freshness duration, memory is reused indefinitely. Without
+    /// memory, concurrent cached loads share the same source work.
     case cached
 
     /// Publishes a cached snapshot when available, then always loads and

@@ -38,7 +38,8 @@ nonisolated struct RemotePageContinuation<
 /// The remote loading capability for one atomic ``Bucket`` snapshot.
 ///
 /// A bucket accepts at most one remote source. Cached loads reach it after all
-/// local sources miss. Cached-then-remote loads require and always reach it,
+/// local sources miss, or when configured snapshot freshness requires remote
+/// validation. Cached-then-remote loads require and always reach it,
 /// while remote loads use it directly and supersede active source work. A
 /// source can progressively disclose pagination or mutations by declaring
 /// ``Load``, ``NextPage``, ``LoadEntry``, ``Store``, and ``Remove`` members.

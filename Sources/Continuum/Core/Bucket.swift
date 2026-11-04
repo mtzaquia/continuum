@@ -58,6 +58,9 @@ public final class Bucket<
     private let unpartitioned: BucketPartition<Space>?
 
     @ObservationIgnored
+    private let staleAfter: Duration?
+
+    @ObservationIgnored
     private let partitionConfiguration:
         (@MainActor @Sendable (Scope.Partition) -> BucketConfiguration<Space>)?
 
@@ -72,11 +75,29 @@ public final class Bucket<
     /// - Parameter keySpace: The key whose atomic snapshot this bucket owns.
     public init(_ keySpace: Space) where Scope == UnpartitionedBucketScope {
         self.keySpace = keySpace
+        staleAfter = nil
         unpartitioned = BucketPartition(keySpace)
         partitionConfiguration = nil
     }
 
-    /// Creates an observable data bucket with additive source capabilities.
+    /// Creates an observable data bucket with unlimited cache reuse.
+    ///
+    /// A bucket accepts any number of local sources and invalidation signals
+    /// and at most one remote source. Cached loads return established memory
+    /// indefinitely. Use the `staleAfter:` initializer to require periodic
+    /// remote validation.
+    ///
+    /// - Parameters:
+    ///   - keySpace: The key whose atomic snapshot this bucket owns.
+    ///   - configuration: The sources attached to this bucket.
+    public convenience init(
+        _ keySpace: Space,
+        @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space>
+    ) where Scope == UnpartitionedBucketScope {
+        self.init(keySpace, staleAfter: nil, configuration: configuration)
+    }
+
+    /// Creates an observable data bucket with configurable snapshot freshness.
     ///
     /// The builder is typed by `keySpace`, so sources infer the complete
     /// snapshot type without receiving the key again. A bucket accepts any
@@ -84,40 +105,92 @@ public final class Bucket<
     /// source. Construction traps if the resulting configuration contains more
     /// than one ``RemoteSource``.
     ///
+    /// With `staleAfter`, cached snapshot loads validate stale or unvalidated
+    /// data remotely while keeping existing values readable. Only successful
+    /// full remote loads restart freshness; expiration starts no work itself.
+    /// Local snapshots have no freshness metadata and are exposed before remote
+    /// validation on the first cached load. Local-only buckets ignore freshness.
+    /// Entry loads keep their existing policies without a freshness interval.
+    ///
     /// - Parameters:
     ///   - keySpace: The key whose atomic snapshot this bucket owns.
+    ///   - staleAfter: How long a successful full remote snapshot remains fresh.
+    ///     Must be nonnegative. `nil` preserves unlimited cache reuse; zero
+    ///     requires remote validation on every cached snapshot load.
     ///   - configuration: The sources attached to this bucket.
     public init(
         _ keySpace: Space,
+        staleAfter: Duration?,
         @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space>
     ) where Scope == UnpartitionedBucketScope {
         self.keySpace = keySpace
+        self.staleAfter = staleAfter
         unpartitioned = BucketPartition(
             keySpace,
+            staleAfter: staleAfter,
             configuration: configuration()
         )
         partitionConfiguration = nil
     }
 
-    /// Creates a bucket containing independently loaded partitions.
+    /// Creates a bucket containing independent partitions with unlimited cache reuse.
     ///
-    /// Partitioning is part of the bucket's structure. The configuration closure
-    /// receives each selected partition once and builds that partition's source
-    /// capabilities lazily. The first access to a partition traps if its
-    /// configuration contains more than one ``RemoteSource``.
+    /// Equal partition identities reuse their snapshot and source work.
+    /// Cached loads return established memory indefinitely. Use the
+    /// `staleAfter:` initializer to require periodic remote validation.
     ///
     /// - Parameters:
     ///   - keySpace: The key shape shared by every partition.
     ///   - partition: The stable type identifying independent snapshots.
     ///   - configuration: The sources for one selected partition.
-    public init<Partition>(
+    public convenience init<Partition>(
         _ keySpace: Space,
-        partitionedBy _: Partition.Type,
+        partitionedBy partition: Partition.Type,
         @BucketBuilder<Space> configuration:
             @escaping @MainActor @Sendable (Partition) ->
                 BucketConfiguration<Space>
     ) where Scope == PartitionedScope<Partition> {
+        self.init(
+            keySpace,
+            partitionedBy: partition,
+            staleAfter: nil,
+            configuration: configuration
+        )
+    }
+
+    /// Creates independently loaded partitions with configurable snapshot freshness.
+    ///
+    /// Partitioning is part of the bucket's structure. The configuration closure
+    /// receives each selected partition once and builds that partition's source
+    /// capabilities lazily. The first access to a partition traps if its
+    /// configuration contains more than one ``RemoteSource``.
+    /// Each partition tracks freshness independently using the same duration.
+    /// Cached snapshot loads expose unvalidated local data before refreshing
+    /// remotely; only successful full remote loads restart the interval.
+    /// Expiration starts no work itself. Entry loads have no freshness interval.
+    ///
+    /// - Parameters:
+    ///   - keySpace: The key shape shared by every partition.
+    ///   - partition: The stable type identifying independent snapshots.
+    ///   - staleAfter: How long each successful full remote snapshot remains
+    ///     fresh. Must be nonnegative. `nil` preserves unlimited cache reuse;
+    ///     zero requires remote validation on every cached snapshot load.
+    ///     Local-only partitions ignore freshness.
+    ///   - configuration: The sources for one selected partition.
+    public init<Partition>(
+        _ keySpace: Space,
+        partitionedBy _: Partition.Type,
+        staleAfter: Duration?,
+        @BucketBuilder<Space> configuration:
+            @escaping @MainActor @Sendable (Partition) ->
+                BucketConfiguration<Space>
+    ) where Scope == PartitionedScope<Partition> {
+        precondition(
+            staleAfter.map { $0 >= .zero } ?? true,
+            "staleAfter must be nonnegative."
+        )
         self.keySpace = keySpace
+        self.staleAfter = staleAfter
         unpartitioned = nil
         partitionConfiguration = configuration
     }
@@ -219,14 +292,16 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
 
     /// Loads and atomically publishes the complete snapshot.
     ///
-    /// A cached load returns established memory immediately, then otherwise
-    /// shares active work or tries local sources before remote. A
-    /// cached-then-remote load publishes available cache data and returns after
-    /// its required remote phase. A remote load supersedes active work and starts
-    /// directly at the remote source. Before a remote result enters memory,
+    /// A cached load returns established memory immediately unless configured
+    /// freshness requires remote validation. Stale values remain readable while
+    /// the shared refresh completes. Otherwise it shares active work or tries
+    /// local sources before remote. A cached-then-remote load publishes available
+    /// cache data and returns after its required remote phase. A remote load
+    /// supersedes active work and starts directly at the remote source. Before
+    /// a remote result enters memory,
     /// writable local sources persist it in declaration order. A remote load
     /// also supersedes pending mutations. Cached-then-remote loads, and cached
-    /// loads without memory, wait for pending mutations and resets.
+    /// loads without fresh memory, wait for pending mutations and resets.
     /// Loading a bucket with no local or remote source emits a runtime warning;
     /// such a bucket is intended to be used as an in-memory bucket.
     ///
@@ -421,6 +496,7 @@ public extension Bucket where Scope: PartitionedBucketScope {
 
         let created = BucketPartition(
             keySpace,
+            staleAfter: staleAfter,
             configuration: partitionConfiguration(partition)
         )
         partitionStorage[partition] = created

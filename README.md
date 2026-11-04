@@ -20,11 +20,12 @@ Requires Swift 6.3, iOS 17+ or macOS 14+. Add the package dependency below
 and the `Continuum` product to your target:
 
 ```swift
-.package(url: "https://github.com/mtzaquia/continuum.git", from: "1.0.1")
+.package(url: "https://github.com/mtzaquia/continuum.git", from: "1.1.0")
 ```
 
-These docs describe development on `main`. Composition and direct iteration
-are not in release 1.0.1; use `branch: "main"` to try them before release.
+Version 1.1.0 includes compositions, direct iteration, and snapshot freshness.
+When upgrading from 1.0.x, review the [migration notes](https://github.com/mtzaquia/continuum/releases/tag/v1.1.0)
+for observation-protocol and sendable key-path changes.
 
 ## Five-minute start
 
@@ -63,7 +64,9 @@ from a bucket that has never loaded.
 
 The default `.cached` policy returns memory or tries local sources before
 remote. Use `.cachedThenRemote` to show cache while refreshing, or `.remote`
-to supersede work and fetch fresh data. [Choose a loading policy →](docs/loading.md)
+to supersede work and fetch fresh data. Add `staleAfter: .seconds(300)` to a
+bucket initializer to have cached snapshot loads refresh stale data while
+keeping existing values readable. [Choose a loading policy →](docs/loading.md)
 
 ## Observe and combine
 

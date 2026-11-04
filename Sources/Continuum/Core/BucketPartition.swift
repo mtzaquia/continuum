@@ -139,6 +139,15 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private let remoteSource: RemoteSource<Space>?
 
     @ObservationIgnored
+    private let staleAfter: Duration?
+
+    @ObservationIgnored
+    private let now: @MainActor @Sendable () -> ContinuousClock.Instant
+
+    @ObservationIgnored
+    private var lastRemoteLoad: ContinuousClock.Instant?
+
+    @ObservationIgnored
     private let persistence: LocalPersistenceCoordinator<Space>
 
     @ObservationIgnored
@@ -188,8 +197,14 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
 
     init(
         _ keySpace: Space,
+        staleAfter: Duration? = nil,
+        now: @escaping @MainActor @Sendable () -> ContinuousClock.Instant = { .now },
         configuration: BucketConfiguration<Space> = BucketConfiguration()
     ) {
+        precondition(
+            staleAfter.map { $0 >= .zero } ?? true,
+            "staleAfter must be nonnegative."
+        )
         precondition(
             configuration.remoteSources.count <= 1,
             "A data bucket accepts at most one RemoteSource."
@@ -201,6 +216,8 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
             version: keySpace.version
         )
         self.keySpace = keySpace
+        self.staleAfter = staleAfter
+        self.now = now
         self.localSources = localSources
         self.logIdentity = logIdentity
         remoteSource = configuration.remoteSources.first
@@ -355,14 +372,16 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
 
     /// Loads and atomically publishes the complete snapshot.
     ///
-    /// A cached load returns established memory immediately, then otherwise
-    /// shares active work or tries local sources before remote. A
-    /// cached-then-remote load publishes available cache data and returns after
-    /// its required remote phase. A remote load supersedes active work and starts
-    /// directly at the remote source. Before a remote result enters memory,
+    /// A cached load returns established memory immediately unless configured
+    /// freshness requires remote validation. Stale values remain readable while
+    /// the shared refresh completes. Otherwise it shares active work or tries
+    /// local sources before remote. A cached-then-remote load publishes available
+    /// cache data and returns after its required remote phase. A remote load
+    /// supersedes active work and starts directly at the remote source. Before
+    /// a remote result enters memory,
     /// writable local sources persist it in declaration order. A remote load
     /// also supersedes pending mutations. Cached-then-remote loads, and cached
-    /// loads without memory, wait for pending mutations and resets.
+    /// loads without fresh memory, wait for pending mutations and resets.
     /// Loading a bucket with no local or remote source emits a runtime warning;
     /// such a bucket is intended to be used as an in-memory bucket.
     ///
@@ -737,6 +756,7 @@ private extension BucketPartition {
         loadState = LoadState(isLoaded: loadState.isLoaded)
         let ownership = MutationOwnership(epoch: epoch, generation: generation)
         let previousSnapshot = snapshot
+        let previousRemoteLoad = lastRemoteLoad
         let previousPaginationCheckpoint = paginationCheckpoint
         let resetsPagination: Bool
 
@@ -815,6 +835,7 @@ private extension BucketPartition {
                 to: previousSnapshot,
                 after: error,
                 ownership: ownership,
+                lastRemoteLoad: previousRemoteLoad,
                 restoring: resetsPagination ? previousPaginationCheckpoint : nil
             )
             throw error
@@ -847,6 +868,7 @@ private extension BucketPartition {
                 loadState = LoadState(isLoaded: true)
             } else {
                 storedSnapshot = .absent
+                lastRemoteLoad = nil
                 loadState = LoadState()
             }
         }
@@ -856,11 +878,13 @@ private extension BucketPartition {
         to snapshot: Space.Snapshot?,
         after error: any Error,
         ownership: MutationOwnership,
+        lastRemoteLoad: ContinuousClock.Instant?,
         restoring paginationCheckpoint: PaginationCheckpoint?
     ) async {
         guard ownsState(ownership) else { return }
 
         publishStreamState {
+            self.lastRemoteLoad = lastRemoteLoad
             if let snapshot {
                 storedSnapshot = .present(snapshot)
             } else {
@@ -913,7 +937,12 @@ private extension BucketPartition {
     }
 
     func loadCached() async throws -> Space.Snapshot {
-        if loadState.isLoaded == false { try await waitForMutations() }
+        if loadState.isLoaded == false || requiresRemoteValidation {
+            try await waitForMutations()
+        }
+        if requiresRemoteValidation {
+            return try await loadCachedThenRemote()
+        }
         if loadState.isLoaded, let snapshot {
             continuumDebug(
                 .loadReturnedMemory(
@@ -936,6 +965,12 @@ private extension BucketPartition {
 
         let flight = makeCachedFlight()
         return try await resolve(flight).snapshot
+    }
+
+    private var requiresRemoteValidation: Bool {
+        guard let staleAfter, remoteSource != nil else { return false }
+        guard let lastRemoteLoad else { return true }
+        return lastRemoteLoad.duration(to: now()) >= staleAfter
     }
 
     func loadCachedThenRemote() async throws -> Space.Snapshot {
@@ -1333,6 +1368,7 @@ private extension BucketPartition {
                 loadState = LoadState(isLoaded: true)
 
                 if outcome.origin == .remote {
+                    lastRemoteLoad = now()
                     paginationCheckpoint = if remoteSource?.isPaginated == true {
                         .available(outcome.nextPage)
                     } else {
