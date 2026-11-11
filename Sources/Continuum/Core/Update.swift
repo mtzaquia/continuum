@@ -34,9 +34,9 @@ nonisolated public enum Update<Snapshot: Sendable>: Sendable {
 /// The observable-source contract implemented by Continuum types.
 ///
 /// Continuum provides conformances for ``Bucket``, ``BucketPartition``, and
-/// ``Composition``. External asynchronous sources should use
-/// ``Input/init(updates:subscriptionOnLoad:load:)`` rather than adding a
-/// conformance.
+/// ``Composition``. Bridge external observable state with
+/// ``Input/init(update:load:)`` and asynchronous sequences with
+/// ``Input/init(updates:subscriptionOnLoad:load:)``.
 @MainActor
 public protocol UpdateSource<Snapshot>: AnyObject, Observable {
     associatedtype Snapshot: Sendable

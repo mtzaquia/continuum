@@ -90,6 +90,126 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 9)
     }
 
+    @Test("Observable update inputs gate, fail, reset, and recover from repository phase changes")
+    func observableUpdateAvailability() async {
+        let repository = RepositoryState<Int?>()
+        let required = Composition { Input(update: { repository.update }) } transform: { $0 ?? -2 }
+        let optionalInput: Input<Int?> = Input(update: { repository.update }).optional()
+        let optional = Composition { optionalInput } transform: { $0 ?? -1 }
+        #expect(isReset(required.latest))
+        #expect(success(optional.latest) == -1)
+        var requiredUpdates = required.makeAsyncIterator()
+        var optionalUpdates = optional.makeAsyncIterator()
+        #expect(success(await optionalUpdates.next()) == -1)
+
+        repository.phase = .loaded(nil)
+        #expect(success(await requiredUpdates.next()) == -2)
+        #expect(success(await optionalUpdates.next()) == -1)
+        repository.phase = .loaded(7)
+        #expect(success(await requiredUpdates.next()) == 7)
+        #expect(success(await optionalUpdates.next()) == 7)
+        repository.phase = .failed(TestError.failed)
+        #expect(isFailure(await requiredUpdates.next()))
+        #expect(success(await optionalUpdates.next()) == -1)
+        #expect((optional.error as? CompositionError)?.errors.first is TestError)
+
+        repository.phase = .idle
+        #expect(isReset(await requiredUpdates.next()))
+        #expect(success(await optionalUpdates.next()) == -1)
+        #expect(optional.error == nil)
+        repository.phase = .loaded(8)
+        #expect(success(await requiredUpdates.next()) == 8)
+    }
+
+    @Test("Observable update inputs forward policies and report the source failure once")
+    func observableUpdateLoad() async {
+        let repository = RepositoryState<Int>()
+        var policies: [LoadPolicy] = []
+        let composition = Composition {
+            Input(update: { repository.update }, load: { policy in
+                policies.append(policy)
+                switch policy {
+                case .cached: break
+                case .cachedThenRemote: throw NumberedError(number: 1)
+                case .remote:
+                    repository.phase = .failed(NumberedError(number: 2))
+                    throw NumberedError(number: 3)
+                }
+            })
+        } transform: { $0 + 1 }
+
+        #expect(policies.isEmpty)
+        await composition.load(using: .cached)
+        #expect(isReset(composition.latest))
+        await composition.load(using: .cachedThenRemote)
+        let actionFailure = composition.error as? CompositionError
+        #expect(actionFailure?.errors.compactMap { ($0 as? NumberedError)?.number } == [1])
+        await composition.load(using: .remote)
+        let sourceFailure = composition.error as? CompositionError
+        #expect(sourceFailure?.errors.compactMap { ($0 as? NumberedError)?.number } == [2])
+        #expect(policies == [.cached, .cachedThenRemote, .remote])
+
+        var updates = composition.makeAsyncIterator()
+        #expect(isFailure(await updates.next()))
+        repository.phase = .loaded(8)
+        #expect(success(await updates.next()) == 9)
+        #expect(composition.error == nil)
+    }
+
+    @Test("Nested compositions preserve an observed reset before an accompanying failure")
+    func observableUpdateNestedReset() async {
+        let repository = RepositoryState<Int>()
+        let permissions = RepositoryState<Int>()
+        repository.phase = .loaded(1)
+        permissions.phase = .loaded(2)
+        let inner = Composition {
+            Input(update: { repository.update })
+            Input(update: { permissions.update })
+        } transform: { $0 + $1 }
+        let middle = Composition { Input(inner) } transform: { $0 * 2 }
+        let outer = Composition { Input(middle) } transform: { $0 + 1 }
+        var updates = outer.makeAsyncIterator()
+        #expect(success(await updates.next()) == 7)
+
+        repository.phase = .idle
+        permissions.phase = .failed(TestError.failed)
+        guard isReset(await updates.next()) else {
+            Issue.record("Expected the reset before the failure")
+            return
+        }
+        #expect(isFailure(await updates.next()))
+        repository.phase = .loaded(3)
+        permissions.phase = .loaded(4)
+        #expect(success(await updates.next()) == 15)
+    }
+
+    @Test("Observable update inputs read the current outcome after coalesced writes")
+    func observableUpdateCoalescing() async {
+        let repository = RepositoryState<Int>()
+        repository.phase = .loaded(1)
+        let composition = Composition { Input(update: { repository.update }) } transform: { $0 }
+        var updates = composition.makeAsyncIterator()
+        #expect(success(await updates.next()) == 1)
+
+        repository.phase = .idle
+        repository.phase = .loaded(2)
+        #expect(success(await updates.next()) == 2)
+    }
+
+    @Test("Observable array inputs can supply a relationship root")
+    func observableUpdateRelationshipRoot() async {
+        let repository = RepositoryState<[Favorite]>()
+        let composition = Composition {
+            Input(update: { repository.update }).resolving(\.id) { id, _ in "favorite-\(id)" }
+        } transform: { favorites, names in favorites.compactMap { names[$0.id] } }
+        #expect(isReset(composition.latest))
+        var updates = composition.makeAsyncIterator()
+        repository.phase = .loaded([Favorite(id: 7)])
+        #expect(success(await updates.next()) == ["favorite-7"])
+        repository.phase = .idle
+        #expect(isReset(await updates.next()))
+    }
+
     @Test("Builder branches preserve typed slots, including multiple optional inputs", arguments: [false, true])
     func branches(flag: Bool) {
         let composition = Composition {
@@ -702,6 +822,25 @@ private enum TestError: Error { case failed }
 
 @MainActor @Observable
 private final class Preferences { var language = "en" }
+
+@MainActor @Observable
+private final class RepositoryState<Value: Sendable> {
+    enum Phase {
+        case idle
+        case loaded(Value)
+        case failed(any Error)
+    }
+
+    var phase: Phase = .idle
+
+    var update: Update<Value> {
+        switch phase {
+        case .idle: .reset
+        case .loaded(let value): .result(.success(value))
+        case .failed(let error): .result(.failure(error))
+        }
+    }
+}
 
 @MainActor @Observable
 private final class Source<T: Sendable>: UpdateSource {

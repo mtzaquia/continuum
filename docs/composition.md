@@ -25,7 +25,8 @@ indexed favorites bucket supplies `[Favorite]`. No snapshot wrapper is exposed.
 | --- | --- |
 | `Input(source)` | Observe a bucket, selected partition, or another composition. |
 | `Input(source) { policy in … }` | Also participate in explicit composition loads. |
-| `Input { expression }` | Track observable properties read by the closure. Add `load: { policy in … }` for loading. |
+| `Input { expression }` | Observe an always-available value. Add `load: { policy in … }` for loading. |
+| `Input(update: { … }, load: …)` | Observe an external outcome that can be available, unavailable, or failed. The load action is optional. |
 | `.optional()` | Supply nil when the input has no available outcome or its outcome is a failure. |
 
 Required inputs block the transform until available. Empty collections are
@@ -207,6 +208,45 @@ keys are `Hashable & Sendable`, and key paths must preserve sendability. The
 related collection's index must match the foreign-key type. One relationship per declaration
 is supported; chaining and `.optional()` on the pair are not. A conditional
 builder block can make both parameters optional.
+
+## Bridge other observable state
+
+Use `Input(update:load:)` when another repository owns the current phase.
+Map the phase to an `Update` by reading the repository's observable properties.
+
+```swift
+let feed = Composition {
+  Input(
+    update: {
+      switch legacyPosts.phase {
+      case .idle, .loading: .reset
+      case .loaded(let posts): .result(.success(posts))
+      case .failed(let error): .result(.failure(error))
+      }
+    },
+    load: { policy in try await legacyPosts.load(using: policy) }
+  )
+} transform: { posts in
+  posts.map(\.title)
+}
+```
+
+A required input waits while the closure returns `.reset`. An observed reset
+clears a previous result, and a failure outcome fails the composition.
+With `.optional()`, an unavailable or failed outcome supplies `nil` and any
+error is available through `Composition.error`. An array outcome can serve as
+the root of `.resolving`, with the relationship supplied by a separate lookup.
+
+Omit `load` for observation alone. An explicit composition load forwards its
+policy to the action. The action establishes a value by updating the observed
+state. If the closure reports a failure when the action throws, the reported
+failure is used. An otherwise unreported action error lasts until the next load.
+
+An observed reset propagates through nested compositions. If the repository
+resets and replaces its data before the closure is read again, Observation may
+deliver only the replacement.
+
+Use `Input { expression }` for an always-available value such as a preference.
 
 ## Bridge result sequences
 

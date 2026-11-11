@@ -16,6 +16,9 @@
   errors from optional and nested inputs. `mapFailures:` maps the full list
   once, and a failed `latest` shares the same mapped error. The default returns
   an ordered `CompositionError`.
+- `Input(update:load:)` bridges observable repository state that reports its
+  own availability and failures. Observed resets propagate through nested
+  compositions.
 
 This changes observable behavior even though existing `Update` switches still
 compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).

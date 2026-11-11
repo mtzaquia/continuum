@@ -62,7 +62,7 @@ public struct Input<Value: Sendable> {
     /// closure is reevaluated on the main actor and should be free of side
     /// effects. Its returned value, including a domain `nil`, is available.
     public init(_ read: @escaping @MainActor () -> Value) {
-        self.init(read: { .init(value: read(), unavailable: false, failures: []) })
+        self.init(readUpdate: { .result(.success(read())) })
     }
 
     /// Observes an expression and supplies an action to update its observable state.
@@ -73,11 +73,32 @@ public struct Input<Value: Sendable> {
         _ read: @escaping @MainActor () -> Value,
         load: @escaping @MainActor (LoadPolicy) async throws -> Void
     ) {
-        let loader = CompositionLoad(load)
-        self.init(read: {
-            .init(value: read(), unavailable: false,
-                  failures: loader.error.map { [$0] } ?? [])
-        }, load: { policy in await loader.run(policy) })
+        self.init(readUpdate: { .result(.success(read())) }, loader: CompositionLoad(load))
+    }
+
+    /// Observes a closure that reports its value, failure, or unavailability.
+    ///
+    /// The closure runs on the main actor under observation and should be free
+    /// of side effects. A required input waits on `.reset` and fails on a failure
+    /// result. An observed reset clears any previous composition result. Changes
+    /// made before the closure is read again may coalesce.
+    ///
+    /// - Parameters:
+    ///   - update: Reads the current outcome from observable state.
+    ///   - load: An optional action receiving the composition's loading policy.
+    ///     If the closure already reports failure, that failure takes precedence
+    ///     over an error thrown by the action.
+    public init(
+        update: @escaping @MainActor () -> Update<Value>,
+        load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
+    ) {
+        let loader = load.map { action in
+            CompositionLoad(action, sourceOwnsOutcome: {
+                if case .result(.failure) = update() { return true }
+                return false
+            })
+        }
+        self.init(readUpdate: update, loader: loader)
     }
 
     /// Bridges a sequence of results into the composition's required inputs.
@@ -135,12 +156,27 @@ public struct Input<Value: Sendable> {
     private init<Source: UpdateSource>(
         _ source: Source, loader: CompositionLoad?
     ) where Source.Snapshot == Value {
-        let bucket = source as? any BucketSnapshotSource
-        let nested = source as? any CompositionErrorSource
+        let resetSource = source as? any CompositionResetSource
+        self.init(
+            readUpdate: { source.latest },
+            resetRevision: { resetSource?.compositionResetRevision ?? 0 },
+            loader: loader,
+            bucket: source as? any BucketSnapshotSource,
+            nested: source as? any CompositionErrorSource
+        )
+    }
+
+    private init(
+        readUpdate: @escaping @MainActor () -> Update<Value>,
+        resetRevision: @escaping @MainActor () -> UInt = { 0 },
+        loader: CompositionLoad? = nil,
+        bucket: (any BucketSnapshotSource)? = nil,
+        nested: (any CompositionErrorSource)? = nil
+    ) {
         read = {
-            let update = source.latest
+            let update = readUpdate()
             let failures = loader?.error.map { [$0] } ?? []
-            let resetRevision = (source as? any CompositionResetSource)?.compositionResetRevision ?? 0
+            let revision = resetRevision()
             let reportErrors: @MainActor () -> [any Error]? = {
                 if let errors = nested?.underlyingErrors, !errors.isEmpty {
                     if case .result(.failure) = update { return errors }
@@ -152,13 +188,13 @@ public struct Input<Value: Sendable> {
             switch update {
             case .reset:
                 return .init(value: nil, unavailable: true,
-                             failures: failures, resetRevision: resetRevision, reportedFailures: reportErrors)
+                             failures: failures, resetRevision: revision, reportedFailures: reportErrors)
             case .result(.failure(let error)):
-                return .init(value: nil, unavailable: false, failures: [error], resetRevision: resetRevision,
+                return .init(value: nil, unavailable: false, failures: [error], resetRevision: revision,
                              reportedFailures: nested == nil ? nil : reportErrors)
             case .result(.success(let value)):
                 return .init(value: value, unavailable: false,
-                             failures: failures, resetRevision: resetRevision, reportedFailures: reportErrors)
+                             failures: failures, resetRevision: revision, reportedFailures: reportErrors)
             }
         }
         if let loader {
