@@ -179,12 +179,13 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         recompute()
     }
 
-    /// Runs all configured loading actions concurrently and waits for completion.
+    /// Runs input loading actions concurrently and waits for them to finish.
     ///
-    /// Required action failures can fail the outcome. A bucket input with an
-    /// available snapshot still contributes its value. Read ``error`` for its
-    /// refresh failure. Siblings continue after a failure. Cancellation
-    /// propagates to actions without publishing an error. Overlapping calls run
+    /// Bucket inputs load with the supplied policy by default. Custom actions
+    /// receive the same policy. Required action failures can fail the outcome.
+    /// A bucket input with an available snapshot still contributes its value.
+    /// Read ``error`` for its refresh failure. Siblings continue after a failure.
+    /// Cancellation propagates to actions without publishing an error. Overlapping calls run
     /// independently, and the newest invocation of each action owns its error
     /// state. Bucket loading policies still govern source work. Duplicate
     /// declarations invoke their actions independently.

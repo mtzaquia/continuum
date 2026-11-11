@@ -54,9 +54,9 @@ let comparison = Composition {
 }
 ```
 
-Select a partition before reading `latest` or iterating: the outer bucket has no
-combined outcome. The example inputs observe only; attach loading closures to
-make them participate in composition loads.
+Read `latest` and iterate on the selected partition. `comparison.load()` loads
+both selected partitions with `.cached`. Use `Input(accounts[.sell]) { _ in }`
+to observe that partition without loading it through the composition.
 
 Use [entry loading](loading.md#load-one-indexed-entry) to fetch an individual
 entity from an indexed collection. For

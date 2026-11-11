@@ -232,15 +232,55 @@ struct CompositionTests {
         #expect(success(composition.latest) == (flag ? "2:FIRST:false:false" : "3:SECOND:true:true"))
     }
 
-    @Test("Loading forwards policies to bucket and observable inputs, while passive inputs stay passive")
-    func loading() async {
-        let source = Source<Int>()
+    @Test("Bucket and optional partition inputs automatically use the composition load policy",
+          arguments: [LoadPolicy.cached, .cachedThenRemote, .remote])
+    func automaticBucketLoading(policy: LoadPolicy) async {
+        let calls = LocalLoadCalls()
+        let bucket = Bucket(Key<Int>("composition.auto")) {
+            LocalSource {
+                await calls.record("bucket")
+                return 1
+            }
+            RemoteSource { 2 }
+        }
+        let partitioned = Bucket(Key<String>("composition.auto.partition"), partitionedBy: String.self) { key in
+            LocalSource {
+                await calls.record(key)
+                return "local-\(key)"
+            }
+            RemoteSource { "remote-\(key)" }
+        }
+        let composition = Composition {
+            Input(bucket)
+            Input(partitioned["selected"]).optional()
+        } transform: { "\($0):\($1 ?? "none")" }
+        #expect(isReset(composition.latest))
+        #expect(isReset(bucket.latest))
+        #expect(isReset(partitioned["selected"].latest))
+
+        if policy == .cached {
+            await composition.load()
+        } else {
+            await composition.load(using: policy)
+        }
+
+        #expect(success(composition.latest) == (policy == .cached ? "1:local-selected" : "2:remote-selected"))
+        #expect(await calls.keys == (policy == .remote ? [] : ["bucket", "selected"]))
+        #expect(isReset(partitioned["other"].latest))
+        #expect(composition.error == nil)
+    }
+
+    @Test("An explicit bucket action replaces automatic loading and receives the policy")
+    func customLoading() async {
+        let source = Bucket(Key<Int>("composition.custom")) {
+            RemoteSource { throw TestError.failed }
+        }
         let preferences = Preferences()
         var calls: [String] = []
         let composition = Composition {
             Input(source) { policy in
                 if case .remote = policy { calls.append("snapshot") }
-                source.update = .result(.success(7))
+                try await source.store(7)
             }
             Input { preferences.language } load: { policy in
                 if case .remote = policy { calls.append("value") }
@@ -251,6 +291,7 @@ struct CompositionTests {
         await composition.load(using: .remote)
         #expect(calls.sorted() == ["snapshot", "value"])
         #expect(success(composition.latest) == "8:nl")
+        #expect(composition.error == nil)
         #expect(!composition.isLoading)
     }
 
@@ -320,7 +361,7 @@ struct CompositionTests {
             RemoteSource { throw TestError.failed }
         }
         let composition = Composition {
-            Input(bucket) { policy in try await bucket.load(using: policy) }
+            Input(bucket)
         } transform: { $0 + 1 }
         await composition.load(using: .remote)
         #expect(isFailure(composition.latest))
@@ -330,7 +371,7 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 6)
     }
 
-    @Test("A failed partition refresh keeps a required input available to current and late subscribers")
+    @Test("A failed partition refresh retains its value alongside an observation-only bucket")
     func retainedPartitionAfterCompositionLoad() async throws {
         let bucket = Bucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in
             RemoteSource { throw TestError.failed }
@@ -340,14 +381,15 @@ struct CompositionTests {
         try await partition.store(10)
         try await sibling.store(1)
         let composition = Composition {
-            Input(partition) { policy in try await partition.load(using: policy) }
-            Input(sibling)
+            Input(partition)
+            Input(sibling) { _ in }
         } transform: { $0 + $1 }
         var current = composition.makeAsyncIterator()
         #expect(success(await current.next()) == 11)
 
         await composition.load(using: .remote)
         #expect(partition.error is TestError)
+        #expect(sibling.error == nil)
         #expect((composition.error as? CompositionError)?.errors.count == 1)
         #expect((composition.error as? CompositionError)?.errors.first is TestError)
         #expect(success(composition.latest) == 11)
@@ -821,6 +863,12 @@ struct CompositionTests {
 
 nonisolated private struct Favorite: Sendable { let id: Int }
 private enum TestError: Error { case failed }
+
+private actor LocalLoadCalls {
+    private(set) var keys: Set<String> = []
+
+    func record(_ key: String) { keys.insert(key) }
+}
 
 @MainActor @Observable
 private final class Preferences { var language = "en" }

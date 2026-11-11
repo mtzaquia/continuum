@@ -23,8 +23,8 @@
 /// An observed bucket, composition, or expression with an optional loading action.
 ///
 /// Inputs are required by default. Use ``optional()`` to supply `nil` when
-/// unavailable or failed. Omitting the loading closure makes this input observe
-/// only. Construction does not load the source.
+/// unavailable or failed. Bucket and selected partition inputs load by default
+/// when the composition loads. Construction does not load the source.
 @MainActor
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
@@ -32,26 +32,50 @@ public struct Input<Value: Sendable> {
     let activate: InputActivation?
     private var materialize: (@MainActor () -> Input<Value>)? = nil
 
-    /// Observes a source with an optional action for explicit composition loads.
+    /// Observes a source and lets it participate in explicit composition loads.
     ///
-    /// The action updates the observed source; its completion alone does not
-    /// establish a snapshot. An available bucket snapshot takes precedence over
-    /// a thrown load error. Errors already published by the source follow its
-    /// recovery. Other action errors remain until the next load of this input.
+    /// By default, buckets and selected partitions load with the composition's
+    /// policy. Other sources are observation-only. An explicit `load` closure
+    /// replaces the default action. Use `{ _ in }` for an observation-only bucket.
+    ///
+    /// The action updates the observed source. An available bucket snapshot
+    /// takes precedence over a thrown load error. Errors already published by
+    /// the source follow its recovery. Other action errors remain until the next
+    /// load of this input.
     public init<Source: UpdateSource>(
         _ source: Source,
         load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
     ) where Source.Snapshot == Value {
-        let loader = load.map { action in
+        let bucket = source as? any BucketSnapshotSource
+        let action: (@MainActor (LoadPolicy) async throws -> Void)?
+        if let load {
+            action = load
+        } else if let bucket {
+            action = { policy in _ = try await bucket.load(using: policy) }
+        } else {
+            action = nil
+        }
+        let loader = action.map { action in
             CompositionLoad(action, sourceOwnsOutcome: {
                 switch source.latest {
                 case .result(.failure): true
-                case .result(.success): source is any BucketSnapshotSource
+                case .result(.success): bucket != nil
                 case .reset: false
                 }
             })
         }
-        self.init(source, loader: loader)
+        let resetSource = source as? any CompositionResetSource
+        let nested = source as? any CompositionInputSource<Value>
+        self.init(
+            readUpdate: {
+                if let nested { return nested.currentUpdate }
+                return source.latest
+            },
+            resetRevision: { resetSource?.compositionResetRevision ?? 0 },
+            loader: loader,
+            bucket: bucket,
+            nested: nested
+        )
     }
 
     /// Observes an expression without loading it.
@@ -152,23 +176,6 @@ public struct Input<Value: Sendable> {
                 state.activate(forLoad: forLoad && subscriptionOnLoad == .restart)
             })
         })
-    }
-
-    private init<Source: UpdateSource>(
-        _ source: Source, loader: CompositionLoad?
-    ) where Source.Snapshot == Value {
-        let resetSource = source as? any CompositionResetSource
-        let nested = source as? any CompositionInputSource<Value>
-        self.init(
-            readUpdate: {
-                if let nested { return nested.currentUpdate }
-                return source.latest
-            },
-            resetRevision: { resetSource?.compositionResetRevision ?? 0 },
-            loader: loader,
-            bucket: source as? any BucketSnapshotSource,
-            nested: nested
-        )
     }
 
     private init(

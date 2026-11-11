@@ -121,18 +121,18 @@ An awaiting caller's cancellation does not cancel a shared bucket flight.
 
 ```swift
 let feed = Composition {
-  Input(repository.posts) { policy in
-    try await repository.posts.load(using: policy)
-  }
+  Input(repository.posts)
 } transform: { $0 }
 
 await feed.load(using: .remote)
 ```
 
-Composition forwards policies unchanged to every configured action. Independent
-inputs load concurrently; a resolved input loads its root before its related
-keys. `load` returns `Void`. An available bucket snapshot continues to contribute
-its value after a failed refresh. Observe the composition's `error` to present
-that failure. [Composition loading →](composition.md#load-the-composition)
+Bucket inputs load automatically with the policy passed to the composition.
+Pass a custom closure to override the bucket loader, or use
+`Input(repository.posts) { _ in }` to observe the snapshot without loading it.
+Independent inputs load concurrently. A resolved input loads its root before
+its related keys. `load` returns `Void`. An available bucket snapshot continues
+to contribute its value after a failed refresh. Observe the composition's
+`error` to present that failure. [Composition loading →](composition.md#load-the-composition)
 
 Next: [Persistence](persistence.md) · [Compositions](composition.md)

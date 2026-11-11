@@ -23,7 +23,7 @@ struct RelationshipInputTests {
             }
         }
         let composition = Composition {
-            Input(posts) { try await posts.load(using: $0) }.resolving(\.authorID, from: authors)
+            Input(posts).resolving(\.authorID, from: authors)
         } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         #expect(isReset(composition.latest))
         #expect(await calls.values.isEmpty)
@@ -213,7 +213,8 @@ struct RelationshipInputTests {
         let root = Bucket(Key<[Post]>("root"))
         let gate = Gate()
         let composition = Composition {
-            Input(root).resolving(\.authorID) { id, policy in try await gate.resolve(id, policy) }
+            Input(root) { _ in }
+                .resolving(\.authorID) { id, policy in try await gate.resolve(id, policy) }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
         try await root.store([Post(id: 1, authorID: 1)])
         await gate.waitForCalls(1)

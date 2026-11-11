@@ -46,6 +46,11 @@ directly to `Input`, including when you configure a load action. The transform
 can still run as other inputs change. Read `composition.error` for the current
 errors, including failures from optional and nested inputs.
 
+`composition.load(using:)` now loads bucket and selected partition inputs with
+the requested policy. Remove closures that only forward the policy to the
+bucket. Keep custom actions, and pass `Input(bucket) { _ in }` for a bucket
+that should only be observed.
+
 By default, failures in `latest` now carry a `CompositionError`, even for a
 single error. Inspect its `errors` array to recover the underlying types. A
 custom `mapFailures:` now receives the full list of current errors, including

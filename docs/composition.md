@@ -8,9 +8,7 @@ repositories can continue owning their individual buckets.
 
 ```swift
 let displayUser = Composition {
-  Input(repo.user) { policy in
-    try await repo.user.load(using: policy)
-  }
+  Input(repo.user)
   Input(repo.favorites).optional()
   Input { preferences.language }
 } transform: { user, favorites, language in
@@ -23,8 +21,10 @@ indexed favorites bucket supplies `[Favorite]`. No snapshot wrapper is exposed.
 
 | Input | Behavior |
 | --- | --- |
-| `Input(source)` | Observe a bucket, selected partition, or another composition. |
-| `Input(source) { policy in … }` | Also participate in explicit composition loads. |
+| `Input(bucket)` or `Input(bucket[key])` | Observe the snapshot and load it with the composition's policy. |
+| `Input(source)` for other update sources | Observe the source. |
+| `Input(source) { policy in … }` | Run the supplied action in place of any default action. |
+| `Input(bucket) { _ in }` | Observe the bucket without loading it through the composition. |
 | `Input { expression }` | Observe an always-available value. Add `load: { policy in … }` for loading. |
 | `Input(update: { … }, load: …)` | Observe an external outcome that can be available, unavailable, or failed. The load action is optional. |
 | `.optional()` | Supply nil when the input has no available outcome or its outcome is a failure. |
@@ -36,20 +36,22 @@ A successfully loaded nil, a failure, and unavailability then all contribute nil
 
 Construct and access compositions on the main actor. Observable read closures
 should have no side effects; nonobservable mutations cannot trigger updates.
-Ordinary input loading is explicit. Sequence subscriptions and relationship
-resolution have the startup behavior described below.
+Bucket loads start when you call the composition's `load` method. Sequence
+subscriptions and relationship resolution have the startup behavior described
+below.
 
 ## Load the composition
 
 ```swift
-await displayUser.load(using: .cached)
+await displayUser.load() // Uses .cached.
 await displayUser.load(using: .remote)
 ```
 
-Policies pass unchanged to every configured action. Independent actions run
-concurrently, and `load` waits for all of them. A failed action does not cancel
-siblings. Actions must update their observed sources; returning does not itself
-establish a value or wait for a future sequence element.
+The composition forwards its policy unchanged to bucket and partition loaders
+and to custom actions. Independent actions run concurrently, and `load` waits
+for all of them. A failed action does not cancel siblings. Custom actions update
+their observed sources. The composition reads values from those sources as they
+become available.
 
 Composition loading returns `Void`. A bucket input with an established snapshot
 continues to supply its value after its load action throws. Sibling changes still
@@ -134,10 +136,7 @@ let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
 }
 
 let feed = Composition {
-  Input(posts) { policy in
-    try await posts.load(using: policy)
-  }
-  .resolving(\.authorID, from: authors)
+  Input(posts).resolving(\.authorID, from: authors)
 } transform: { posts, authorsByID in
   posts.map { post in
     FeedRow(post: post, author: authorsByID[post.authorID])
@@ -169,10 +168,7 @@ A cached entry needs no loader. Fetching without `LoadEntry` produces
 For a service that does not expose buckets, replace `from:` with a closure:
 
 ```swift
-Input(posts) { policy in
-  try await posts.load(using: policy)
-}
-.resolving(\.authorID) { id, policy in
+Input(posts).resolving(\.authorID) { id, policy in
   try await legacyService.author(id: id, using: policy)
 }
 ```
@@ -187,7 +183,7 @@ configuration or TTL.
 
 | Trigger | Work |
 | --- | --- |
-| Explicit composition load | Finish the root action, then resolve all required keys with the same policy. |
+| Explicit composition load | Load the root if it has a loading action, then resolve all required keys with the same policy. |
 | Available root at construction, or a changed root | Resolve newly introduced keys with `.cached`; retain values for continuing keys. Failed one-shot lookups are retryable. |
 | Keys leave the root | Discard their derived values and stop observing their sources. |
 | Root reset | Clear the pair and discard retained relationship values. |

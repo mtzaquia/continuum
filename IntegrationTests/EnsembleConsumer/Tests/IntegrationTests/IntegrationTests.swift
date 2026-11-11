@@ -68,7 +68,7 @@ struct IntegrationTests {
         let sibling = Source()
         sibling.update = .result(.success(1))
         let composition = Composition {
-            Input(bucket) { policy in try await bucket.load(using: policy) }
+            Input(bucket)
             Input(sibling)
         } transform: { $0 + $1 }
         let model = Consumer(composition) { await composition.load(using: .remote) }

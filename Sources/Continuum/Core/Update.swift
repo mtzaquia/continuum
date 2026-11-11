@@ -118,9 +118,10 @@ func makeSourceObservation<Source: UpdateSource & Sendable>(
     })
 }
 
-// A bucket's outcome remains authoritative when its load action throws with data available.
+// Bucket inputs load snapshots and use the bucket's published outcome and error.
 protocol BucketSnapshotSource: UpdateSource {
     var error: (any Error)? { get }
+    func load(using policy: LoadPolicy) async throws -> Snapshot
 }
 
 extension Bucket: UpdateSource, BucketSnapshotSource where Scope == UnpartitionedBucketScope {}
