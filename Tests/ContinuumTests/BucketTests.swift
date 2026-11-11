@@ -36,11 +36,12 @@ struct BucketTests {
 
     @Test("A singleton bucket stores and removes its value")
     func singletonMemory() async throws {
-        let count = Bucket(TestData.count)
+        let count = Bucket(TestData.count) { LocalSource { 0 } }
 
         #expect(count.value == nil)
         #expect(count.isLoaded == false)
 
+        try await count.load()
         try await count.put(3)
 
         #expect(count.value == 3)
@@ -54,7 +55,8 @@ struct BucketTests {
 
     @Test("A stored value participates in observation tracking")
     func observation() async throws {
-        let count = Bucket(TestData.count)
+        let count = Bucket(TestData.count) { LocalSource { 0 } }
+        try await count.load()
 
         try await confirmation { changed in
             withObservationTracking {
@@ -69,9 +71,9 @@ struct BucketTests {
 
     @Test("Updates emit an established snapshot immediately")
     func updatesEmitEstablishedSnapshot() async throws {
-        let labels = Bucket(TestData.labels)
         let expected = Label(id: 1, text: "one")
-        try await labels.put(expected)
+        let labels = Bucket(TestData.labels) { LocalSource { [expected] } }
+        try await labels.load()
         var updates = labels.makeAsyncIterator()
 
         guard case .result(.success(let snapshot))? = await updates.next() else {
@@ -83,8 +85,8 @@ struct BucketTests {
 
     @Test("Updates emit reset while the bucket remains unavailable")
     func updatesEmitReset() async throws {
-        let labels = Bucket(TestData.labels)
-        try await labels.put(Label(id: 1, text: "before"))
+        let labels = Bucket(TestData.labels) { LocalSource { [Label(id: 1, text: "before")] } }
+        try await labels.load()
         var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
@@ -98,10 +100,10 @@ struct BucketTests {
 
     @Test("An indexed subscript returns the model")
     func indexedSubscript() async throws {
-        let labels = Bucket(TestData.labels)
         let label = Label(id: 7, text: "seven")
+        let labels = Bucket(TestData.labels) { LocalSource { [label] } }
 
-        try await labels.put(label)
+        try await labels.load()
 
         #expect(labels[7] == label)
         #expect(labels.value(for: 7) == label)
@@ -109,8 +111,8 @@ struct BucketTests {
 
     @Test("Removing the final indexed value emits loaded empty")
     func indexedRemovalRemainsAvailable() async throws {
-        let labels = Bucket(TestData.labels)
-        try await labels.put(Label(id: 1, text: "one"))
+        let labels = Bucket(TestData.labels) { LocalSource { [Label(id: 1, text: "one")] } }
+        try await labels.load()
         var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
@@ -202,14 +204,16 @@ struct BucketTests {
         let labels = Bucket(
             TestData.labels,
             partitionedBy: Purpose.self
-        ) { _ in }
+        ) { _ in
+            LocalSource { [Label(id: 1, text: "buy")] }
+        }
         let buying = labels[.buy]
         let selling = labels[.sell]
         var buyingUpdates = buying.makeAsyncIterator()
 
         #expect(buying === labels[.buy])
 
-        try await buying.put(Label(id: 1, text: "buy"))
+        try await buying.load()
         _ = await buyingUpdates.next()
         try await buying.reset()
 
@@ -222,12 +226,14 @@ struct BucketTests {
 
     @Test("A composition combines buckets and selected partitions")
     func combinedUpdates() async throws {
-        let count = Bucket(TestData.count)
-        let labels = Bucket(TestData.labels)
+        let count = Bucket(TestData.count) { LocalSource { 2 } }
+        let labels = Bucket(TestData.labels) { LocalSource { [Label(id: 1, text: "one")] } }
         let subscriptions = Bucket(
             TestData.subscription,
             partitionedBy: Purpose.self
-        ) { _ in }
+        ) { _ in
+            LocalSource { Subscription(plan: "plus", runs: []) }
+        }
         let subscription = subscriptions[.buy]
         let composition = Composition {
             Input(count)
@@ -238,11 +244,9 @@ struct BucketTests {
         }
         var updates = composition.makeAsyncIterator()
 
-        try await count.put(2)
-        try await labels.put(Label(id: 1, text: "one"))
-        try await subscription.put(
-            Subscription(plan: "plus", runs: [])
-        )
+        try await count.load()
+        try await labels.load()
+        try await subscription.load()
 
         guard case .result(.success(let value))? = await updates.next() else {
             Issue.record("Expected the combined value")
@@ -319,8 +323,10 @@ struct BucketTests {
         let labels = Bucket(
             TestData.labels,
             partitionedBy: Purpose.self
-        ) { _ in }
+        ) { _ in LocalSource { [] } }
 
+        try await labels[.buy].load()
+        try await labels[.sell].load()
         try await labels[.buy].put(Label(id: 1, text: "buy"))
         try await labels[.sell].put(Label(id: 1, text: "sell"))
 
@@ -362,8 +368,9 @@ struct BucketTests {
         let labels = Bucket(
             TestData.labels,
             partitionedBy: Purpose.self
-        ) { _ in }
+        ) { _ in LocalSource { [] } }
         let buying = labels[.buy]
+        try await buying.load()
 
         try await confirmation { changed in
             withObservationTracking {
@@ -409,11 +416,12 @@ struct BucketTests {
         let writes = SnapshotRecorder<[Label]>()
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                []
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
         }
+        try await labels.load()
 
         try await labels.put(Label(id: 1, text: "one"))
         try await labels.put(Label(id: 2, text: "two"))
@@ -439,19 +447,20 @@ struct BucketTests {
         let authoritative = Label(id: 1, text: "published")
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                []
             } persist: { snapshot in
                 await calls.record("local")
                 await writes.record(snapshot)
             }
             RemoteSource { [Label]() }
         }
+        try await labels.load()
 
         try await labels.mutate { mutation in
-            try await mutation.replace(with: [submitted]) {
+            try await mutation.update { _ in [submitted] } remote: {
                 await remoteStores.record(submitted)
                 await calls.record("remote store")
-                return [authoritative]
+                return .updated([authoritative])
             }
         }
 
@@ -461,8 +470,9 @@ struct BucketTests {
         #expect(await writes.snapshots == [[submitted], [authoritative]])
 
         try await labels.mutate { mutation in
-            try await mutation.update { $0.filter { $0.id != authoritative.id } } remotely: {
+            try await mutation.update { $0.filter { $0.id != authoritative.id } } remote: {
                 await calls.record("remote remove")
+                return .acknowledged
             }
         }
 
@@ -478,22 +488,26 @@ struct BucketTests {
         #expect(await writes.snapshots == [[submitted], [authoritative], []])
     }
 
-    @Test("A mutation publishes before its remote store completes")
-    func resetDuringMutation() async throws {
+    @Test("Reset keeps a running request's outcome and discards its snapshot edits", arguments: [false, true])
+    func resetDuringMutation(fails: Bool) async throws {
         let remoteStore = SnapshotGate<Label>()
         let writes = SnapshotRecorder<[Label]>()
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                []
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
             RemoteSource { [Label]() }
         }
+        try await labels.load()
         let mutation = Task {
             try await labels.mutate { mutation in
-                try await mutation.replace(with: [Label(id: 1, text: "draft")]) {
-                    [await remoteStore.load()]
+                try await mutation.update { _ in [Label(id: 1, text: "draft")] } remote: {
+                    let response = await remoteStore.load()
+                    try Task.checkCancellation()
+                    if fails { throw TestError.failed }
+                    return .updated([response])
                 }
             }
         }
@@ -502,27 +516,25 @@ struct BucketTests {
         #expect(labels.values == [Label(id: 1, text: "draft")])
         #expect(await writes.snapshots == [[Label(id: 1, text: "draft")]])
 
-        let reset = Task {
-            try await labels.reset()
-        }
-        while labels.isLoaded {
-            await Task.yield()
-        }
+        try await labels.reset()
+        #expect(!labels.isLoaded)
         await remoteStore.complete(
             load: 1,
             with: Label(id: 1, text: "published")
         )
 
-        await #expect(throws: CancellationError.self) {
+        if fails {
+            await #expect(throws: TestError.self) { try await mutation.value }
+        } else {
             try await mutation.value
         }
-        try await reset.value
         #expect(
             await writes.snapshots
                 == [[Label(id: 1, text: "draft")], nil]
         )
         #expect(labels.isLoaded == false)
         #expect(labels.isEmpty)
+        #expect(labels.error == nil)
     }
 
     @Test("An authoritative remote identifier replaces the submitted entry")
@@ -539,8 +551,8 @@ struct BucketTests {
         try await labels.mutate { mutation in
             try await mutation.update(id: existing.id) { _ in
                 Label(id: 1, text: "draft")
-            } remotely: {
-                Label(id: 2, text: "created")
+            } remote: {
+                .updated(Label(id: 2, text: "created"))
             }
         }
 
@@ -553,17 +565,24 @@ struct BucketTests {
     func voidRemoteStore() async throws {
         let stored = SnapshotRecorder<Int>()
         let removed = Counter()
-        let count = Bucket(TestData.count) { RemoteSource { 0 } }
+        let count = Bucket(TestData.count) { LocalSource { 0 } }
+        try await count.load()
 
         try await count.mutate { mutation in
-            try await mutation.replace(with: 3) { await stored.record(3) }
+            try await mutation.update { _ in 3 } remote: {
+                await stored.record(3)
+                return .acknowledged
+            }
         }
 
         #expect(count.value == 3)
         #expect(await stored.snapshots == [3])
 
         try await count.mutate { mutation in
-            try await mutation.replace(with: nil) { await removed.increment() }
+            try await mutation.update { _ in nil } remote: {
+                await removed.increment()
+                return .acknowledged
+            }
         }
 
         #expect(count.value == nil)
@@ -588,7 +607,7 @@ struct BucketTests {
 
         let mutation = Task {
             try await labels.mutate { mutation in
-                try await mutation.update { $0 + [Label(id: 2, text: "new")] } remotely: {
+                try await mutation.update { $0 + [Label(id: 2, text: "new")] } remote: {
                     _ = await remoteStore.load()
                     throw TestError.failed
                 }
@@ -623,14 +642,22 @@ struct BucketTests {
         } else { Issue.record("Expected the snapshot restored by rollback") }
     }
 
-    @Test("A failed first store rolls back to unavailable and exposes its error separately")
-    func failedFirstStore() async {
+    @Test("A failed remote mutation while unloaded exposes its error without persisting")
+    func unloadedMutationFailure() async {
+        let writes = SnapshotRecorder<Int>()
         let count = Bucket(TestData.count) {
             LocalSource { nil } persist: { snapshot in
-                if snapshot != nil { throw TestError.failed }
+                await writes.record(snapshot)
             }
         }
-        await #expect(throws: TestError.self) { try await count.put(1) }
+        await #expect(throws: TestError.self) {
+            try await count.mutate { mutation in
+                try await mutation.update { _ in 1 } remote: {
+                    throw TestError.failed
+                }
+            }
+        }
+        #expect(await writes.snapshots.isEmpty)
         #expect(count.value == nil)
         #expect(count.error is TestError)
         if case .reset = count.latest {} else { Issue.record("Expected the original unavailable outcome") }
@@ -653,7 +680,7 @@ struct BucketTests {
 
         let mutation = Task {
             try await labels.mutate { mutation in
-                try await mutation.update { $0.filter { $0.id != existing.id } } remotely: {
+                try await mutation.update { $0.filter { $0.id != existing.id } } remote: {
                     await remoteRemove.load()
                     throw TestError.failed
                 }
@@ -695,8 +722,9 @@ struct BucketTests {
 
         await #expect(throws: TestError.self) {
             try await labels.mutate { mutation in
-                try await mutation.update { $0 + [Label(id: 2, text: "remote")] } remotely: {
+                try await mutation.update { $0 + [Label(id: 2, text: "remote")] } remote: {
                     await remoteStores.increment()
+                    return .acknowledged
                 }
             }
         }
@@ -712,11 +740,12 @@ struct BucketTests {
         let writes = SnapshotRecorder<Int>()
         let count = Bucket(TestData.count) {
             LocalSource {
-                nil
+                0
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
         }
+        try await count.load()
 
         try await count.put(3)
         try await count.delete()
@@ -766,11 +795,12 @@ struct BucketTests {
         let writes = PersistenceGate<[Label]>()
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                []
             } persist: { snapshot in
                 await writes.persist(snapshot)
             }
         }
+        try await labels.load()
 
         let first = Task {
             try await labels.put(Label(id: 1, text: "one"))
@@ -860,11 +890,12 @@ struct BucketTests {
 
     @Test("Indexed values preserve insertion order")
     func insertionOrder() async throws {
-        let labels = Bucket(TestData.labels)
+        let labels = Bucket(TestData.labels) { LocalSource { [] } }
 
         #expect(labels.isEmpty)
         #expect(labels.isLoaded == false)
 
+        try await labels.load()
         try await labels.put(Label(id: 3, text: "three"))
         try await labels.put(Label(id: 1, text: "one"))
         try await labels.put(Label(id: 2, text: "two"))
@@ -967,17 +998,19 @@ struct BucketTests {
     @Test("A remote load skips established memory and local snapshots")
     func remoteLoading() async throws {
         let local = Counter()
+        let remote = Counter()
         let labels = Bucket(TestData.labels) {
             LocalSource {
                 await local.increment()
                 return [Label(id: 3, text: "local")]
             }
             RemoteSource {
-                [Label(id: 3, text: "remote")]
+                await remote.increment()
+                return [Label(id: 3, text: await remote.value == 1 ? "memory" : "remote")]
             }
         }
 
-        try await labels.put(Label(id: 3, text: "memory"))
+        try await labels.load(using: .remote)
         let snapshot = try await labels.load(using: .remote)
 
         #expect(snapshot.map(\.text) == ["remote"])
@@ -1081,11 +1114,12 @@ struct BucketTests {
     func cachedMemoryDuringRefresh() async throws {
         let remote = SnapshotGate<[Label]>()
         let labels = Bucket(TestData.labels) {
+            LocalSource { [Label(id: 1, text: "memory")] }
             RemoteSource {
                 await remote.load()
             }
         }
-        try await labels.put(Label(id: 1, text: "memory"))
+        try await labels.load()
 
         let refresh = Task {
             try await labels.load(using: .remote)
@@ -1153,16 +1187,19 @@ struct BucketTests {
     @Test("Cached then remote skips local sources when memory exists")
     func cachedThenRemoteFromMemory() async throws {
         let local = Counter()
+        let remote = Counter()
         let labels = Bucket(TestData.labels) {
             LocalSource {
                 await local.increment()
                 return [Label(id: 1, text: "local")]
             }
             RemoteSource {
-                [Label(id: 2, text: "remote")]
+                await remote.increment()
+                return await remote.value == 1
+                    ? [Label(id: 1, text: "memory")] : [Label(id: 2, text: "remote")]
             }
         }
-        try await labels.put(Label(id: 1, text: "memory"))
+        try await labels.load(using: .remote)
 
         let snapshot = try await labels.load(using: .cachedThenRemote)
 
@@ -1218,13 +1255,14 @@ struct BucketTests {
                 return [Label(id: 1, text: "local")]
             }
         }
+        try await labels.load()
         try await labels.put(Label(id: 1, text: "memory"))
 
         await #expect(throws: ContinuumError.self) {
             try await labels.load(using: .cachedThenRemote)
         }
 
-        #expect(await local.value == 0)
+        #expect(await local.value == 1)
         #expect(labels[1]?.text == "memory")
         #expect(labels.isLoaded)
         #expect(labels.isLoading == false)
@@ -1255,11 +1293,12 @@ struct BucketTests {
     @Test("A failed refresh preserves the established snapshot")
     func failedRefresh() async throws {
         let labels = Bucket(TestData.labels) {
+            LocalSource { [Label(id: 1, text: "existing")] }
             RemoteSource { () async throws -> [Label] in
                 throw TestError.failed
             }
         }
-        try await labels.put(Label(id: 1, text: "existing"))
+        try await labels.load()
 
         await #expect(throws: TestError.self) {
             try await labels.load(using: .remote)
@@ -1355,14 +1394,15 @@ struct BucketTests {
         _ = try await labels.load()
 
         try await labels.mutate { mutation in
-            try await mutation.update { $0 + [Label(id: 2, text: "draft")] } remotely: {
+            try await mutation.update { $0 + [Label(id: 2, text: "draft")] } remote: {
                 await calls.record("store 2")
-                return [Label(id: 1, text: "one"), Label(id: 2, text: "remote")]
+                return .updated([Label(id: 1, text: "one"), Label(id: 2, text: "remote")])
             }
         }
         try await labels.mutate { mutation in
-            try await mutation.update { $0.filter { $0.id != 1 } } remotely: {
+            try await mutation.update { $0.filter { $0.id != 1 } } remote: {
                 await calls.record("remove 1")
+                return .acknowledged
             }
         }
 
@@ -1762,14 +1802,14 @@ struct BucketTests {
         let existing = Label(id: 1, text: "existing")
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                [existing]
             } persist: { snapshot in
                 guard snapshot != nil else {
                     throw TestError.failed
                 }
             }
         }
-        try await labels.put(existing)
+        try await labels.load()
         var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
@@ -1780,7 +1820,9 @@ struct BucketTests {
         #expect(labels.values == [existing])
         #expect(labels.isLoaded)
         #expect(labels.error is TestError)
-        guard case .result(.success(let snapshot))? = await updates.next() else {
+        var update = await updates.next()
+        if case .reset = update { update = await updates.next() }
+        guard case .result(.success(let snapshot))? = update else {
             Issue.record("Expected the snapshot restored after the failed reset")
             return
         }
@@ -1793,7 +1835,7 @@ struct BucketTests {
         let (events, continuation) = AsyncStream<Void>.makeStream()
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                []
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
@@ -1801,6 +1843,7 @@ struct BucketTests {
                 events
             }
         }
+        try await labels.load()
         try await labels.put(Label(id: 1, text: "one"))
 
         continuation.yield()
@@ -1824,7 +1867,7 @@ struct BucketTests {
         let existing = Label(id: 1, text: "existing")
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                [existing]
             } persist: { snapshot in
                 try await persistence.persist(snapshot)
             }
@@ -1832,7 +1875,7 @@ struct BucketTests {
                 events
             }
         }
-        try await labels.put(existing)
+        try await labels.load()
 
         continuation.yield()
         await persistence.waitForResetAttempts(1)
@@ -1857,8 +1900,11 @@ struct BucketTests {
     @Test("Invalidation stream errors leave snapshot availability unchanged", arguments: [false, true])
     func invalidationStreamError(loaded: Bool) async throws {
         let (events, continuation) = AsyncThrowingStream<Void, any Error>.makeStream()
-        let count = Bucket(TestData.count) { InvalidationSignal { events } }
-        if loaded { try await count.put(1) }
+        let count = Bucket(TestData.count) {
+            LocalSource { 1 }
+            InvalidationSignal { events }
+        }
+        if loaded { try await count.load() }
         continuation.finish(throwing: TestError.failed)
         while count.error == nil { await Task.yield() }
 
@@ -1877,7 +1923,7 @@ struct BucketTests {
         )
         let labels = Bucket(TestData.labels) {
             LocalSource {
-                nil
+                [Label(id: 1, text: "one")]
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
@@ -1885,15 +1931,16 @@ struct BucketTests {
                 NotificationCenter.default.notifications(named: name)
             }
         }
-        try await labels.put(Label(id: 1, text: "one"))
+        try await labels.load()
 
         NotificationCenter.default.post(name: name, object: nil)
-        await writes.waitForSnapshots(2)
+        await writes.waitForSnapshots(1)
         while labels.isLoaded {
             await Task.yield()
         }
 
         #expect(labels.isEmpty)
+        #expect(await writes.snapshots == [nil])
     }
 }
 

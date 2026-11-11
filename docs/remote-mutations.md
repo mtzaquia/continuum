@@ -25,15 +25,16 @@ let cards = Bucket(IndexedKey<Card.ID, Card>("cards")) {
     case let .rename(id, name):
       try await mutation.update(id: id) { card in
         card.renamed(to: name)
-      } remotely: {
-        try await api.renameCard(id: id, name: name) // Returns the confirmed Card.
+      } remote: {
+        .updated(try await api.renameCard(id: id, name: name))
       }
 
     case let .terminate(id):
       try await mutation.update { cards in
         cards.filter { $0.id != id }
-      } remotely: {
-        try await api.terminateCard(id: id) // Returns Void.
+      } remote: {
+        try await api.terminateCard(id: id)
+        return .acknowledged
       }
 
     case let .request(productID):
@@ -50,12 +51,11 @@ Continuum publishes the optimistic edit, passes the **complete normalized
 snapshot** to each writable `LocalSource`, then runs the paired endpoint.
 A failed local write prevents the endpoint from starting.
 
-A remote response takes precedence over the optimistic edit. An endpoint
-paired with `update(id:)` can return the authoritative entry. Continuum
-replaces the edited entry, including its ID when the server assigns a different
-one, and publishes and persists the complete snapshot again. For a whole
-snapshot update, return the authoritative snapshot. An endpoint returning
-`Void` keeps the optimistic edit.
+Call the endpoint in the `remote:` trailing closure. Return `.acknowledged`
+to keep the optimistic edit, or `.updated(value)` to apply the server's
+entry or whole snapshot. For an entry edit, the returned entry can change
+its ID. Continuum publishes and persists the resulting complete snapshot.
+Omit `remote:` for a local edit.
 
 ## Annotate a typed bucket
 
@@ -85,21 +85,21 @@ mutation queue without touching the snapshot. An independent service call
 can also run outside the bucket. When a requested card is created later, a
 subsequent collection load can publish it.
 
-Use `replace(with:)` to explicitly establish a complete snapshot, including
-for an in-memory bucket. Passing `nil` clears the snapshot. Pass `[]` to
-establish an empty collection.
+Call `load()` to establish a snapshot before editing it. A `LocalSource`
+can supply an initial snapshot for an in-memory bucket. A source returning
+`[]` establishes an empty collection.
 
 ## Supply a mutation closure at the call site
 
-Buckets created without a `Mutate` handler accept a closure through the same method.
-The closure can edit or replace the complete snapshot and pair its edit with a
-remote action.
+Buckets created without a `Mutate` handler accept a closure through the same
+method. The closure can edit an established snapshot and pair its edit with
+a remote action.
 
 ```swift
-let favorites = Bucket(IndexedKey<Card.ID, Card>("favorites"))
-try await favorites.mutate { mutation in
-  try await mutation.replace(with: [firstFavorite])
+let favorites = Bucket(IndexedKey<Card.ID, Card>("favorites")) {
+  LocalSource { [firstFavorite] }
 }
+try await favorites.load()
 try await favorites.mutate { mutation in
   try await mutation.update { $0.filter { $0.id != firstFavorite.id } }
 }
@@ -108,13 +108,14 @@ try await favorites.mutate { mutation in
 ## Understand failure and ordering
 
 A thrown error or cancellation restores the previous snapshot and attempts to
-restore persistence while the mutation still owns the bucket. Reset and forced
-remote loads supersede queued and running mutations. A late response from a
-superseded mutation cannot publish or persist its result. Remote side effects
-already accepted by the server can survive local rollback.
+restore persistence while the mutation still owns the bucket. Reset cancels
+queued mutations and revokes ownership from a running handler. An in-progress
+endpoint still returns its outcome to the caller, while a late response loses
+the ability to publish or persist its result. Remote side effects already
+accepted by the server can survive local rollback.
 
-Cached-then-remote loads and `loadNext()` wait for mutations. A snapshot edit
-preserves the pagination cursor. Keep edits sequential within a handler, and
-use the mutation handle within that invocation.
+Forced remote loads, cached-then-remote loads, and `loadNext()` wait for
+mutations. A snapshot edit preserves the pagination cursor. Keep edits
+sequential within a handler, and use the mutation handle within that invocation.
 
 [Operation ordering](operation-ordering.md) · [Persistence](persistence.md)

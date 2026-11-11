@@ -89,6 +89,7 @@ struct RelationshipInputTests {
                 }
             }
         }
+        try await authors.load()
         let composition = Composition {
             Input { [Post(id: 1, authorID: 7)] }.resolving(\.authorID, from: authors)
         } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
@@ -233,13 +234,15 @@ struct RelationshipInputTests {
 
     @Test("Root reset clears the pair and rejects pending resolution")
     func rootReset() async throws {
-        let root = Bucket(Key<[Post]>("root"))
+        let root = Bucket(Key<[Post]>("root")) {
+            LocalSource { [Post(id: 1, authorID: 1)] }
+        }
         let gate = Gate()
         let composition = Composition {
             Input(root) { _ in }
                 .resolving(\.authorID) { id, policy in try await gate.resolve(id, policy) }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
-        try await root.put([Post(id: 1, authorID: 1)])
+        try await root.load()
         await gate.waitForCalls(1)
         gate.finish(id: 1, value: "one")
         await until { value(composition.latest) != nil }
@@ -302,11 +305,12 @@ struct RelationshipInputTests {
 
     @Test("A relationship forwards its root's refresh error while retaining the resolved pair")
     func retainedRootRefreshError() async throws {
+        let snapshot = [Post(id: 1, authorID: 1)]
         let posts = Bucket(Key<[Post]>("posts.refresh-error")) {
+            LocalSource { snapshot }
             RemoteSource { throw LookupError.failed }
         }
-        let snapshot = [Post(id: 1, authorID: 1)]
-        try await posts.put(snapshot)
+        try await posts.load()
         let composition = Composition {
             Input(posts).resolving(\.authorID) { _, _ in "one" }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
@@ -322,6 +326,7 @@ struct RelationshipInputTests {
     @Test("Indexed bucket reset history survives recovery and nested observation")
     func nestedResetHistory() async throws {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            LocalSource { [Author(id: 1, name: "two")] }
             RemoteSource {
                 Load { [Author]() }
                 Load { id in Author(id: id, name: "one") }
@@ -335,7 +340,7 @@ struct RelationshipInputTests {
         var iterator = parent.makeAsyncIterator()
         _ = await iterator.next()
         try await authors.reset()
-        try await authors.put(Author(id: 1, name: "two"))
+        try await authors.load()
         var sawReset = false
         while let update = await iterator.next() {
             if isReset(update) { sawReset = true }
@@ -348,6 +353,7 @@ struct RelationshipInputTests {
     func nativePolicies(policy: LoadPolicy) async throws {
         let calls = Calls()
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            LocalSource { [Author(id: 1, name: "local")] }
             RemoteSource {
                 Load { [Author]() }
                 Load { id in
@@ -356,7 +362,7 @@ struct RelationshipInputTests {
                 }
             }
         }
-        try await authors.put(Author(id: 1, name: "local"))
+        try await authors.load()
         let source = Source<[Post]>()
         let composition = Composition {
             Input(source) { received in
@@ -383,6 +389,7 @@ struct RelationshipInputTests {
         let root = Root([Post(id: 1, authorID: 1)])
         let gate = Gate()
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
+            LocalSource { [Author(id: 1, name: "recovered"), Author(id: 2, name: "two")] }
             RemoteSource {
                 Load { [Author]() }
                 Load { id in Author(id: id, name: try await gate.resolve(id, .cached)) }
@@ -401,8 +408,7 @@ struct RelationshipInputTests {
         gate.finish(id: 2, value: "two")
         await gate.waitForReturns(2)
         #expect(isReset(composition.latest))
-        try await authors.put(Author(id: 1, name: "recovered"))
-        try await authors.put(Author(id: 2, name: "two"))
+        try await authors.load()
         await until { value(composition.latest)?.authors == [1: "recovered", 2: "two"] }
     }
 

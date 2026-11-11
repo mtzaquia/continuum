@@ -308,7 +308,7 @@ nonisolated enum ContinuumLogEvent {
             let established
         ):
             """
-            requested load for source-less in-memory bucket \(bucket.rendered) \
+            requested load for source-less bucket \(bucket.rendered) \
             policy=\(policy.debugName) established=\(established)
             """
         case .loadReturnedMemory(let bucket, let count):

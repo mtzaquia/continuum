@@ -11,7 +11,7 @@ let posts = try await repository.posts.load(using: .cachedThenRemote)
 | --- | --- |
 | `.cached` (default) | Return established memory unless `staleAfter` requires remote validation. Otherwise try local sources in order, then remote. Callers requiring source work share it. |
 | `.cachedThenRemote` | Expose memory or the first local hit, then always reach remote. Return the remote snapshot. Concurrent callers share work. |
-| `.remote` | Skip cache, supersede active work, and start a new remote flight. Repeated calls are latest-wins. |
+| `.remote` | Wait for mutations and resets, skip cache, and replace active reads with a new remote flight. The latest flight wins. |
 
 A local `nil` is a miss; an empty collection is a hit. A local error stops the
 load. Both remote-reaching policies require a `RemoteSource`.
@@ -33,8 +33,8 @@ try await posts.load()
 ```
 
 Omitting the parameter, or passing `nil`, preserves unlimited cache reuse.
-Durations must be nonnegative; `.zero` requires remote validation on every
-cached snapshot load. Local-only and in-memory configurations ignore freshness.
+Durations must be nonnegative. `.zero` requires remote validation on every
+cached snapshot load. Local-only buckets ignore freshness.
 Partitioned buckets accept `staleAfter` after `partitionedBy:`; each selected
 partition tracks its own interval.
 
@@ -104,14 +104,15 @@ preserves the current error. Starting source work or a mutation clears it.
 Successful remote loads finish local persistence before publishing.
 [Persistence details →](persistence.md)
 
-A bucket with no sources is for in-memory mutations. Calling `load()` warns
-and throws `missingRemoteSource` if no snapshot exists.
+Use a `LocalSource` to load an initial in-memory snapshot. Calling `load()`
+on a bucket without sources warns and throws `missingRemoteSource`.
 
 ## Coordinate concurrent work
 
 Cached loading without fresh memory waits for pending mutations and resets
-before checking again. `.cachedThenRemote` also waits; `.remote` supersedes
-them. A cached call with fresh memory returns immediately, even during a refresh.
+before checking again. Both remote-reaching policies also wait for these
+operations. A cached call with fresh memory returns immediately, even during
+a refresh.
 
 If `.cachedThenRemote` joins a cached flight that resolves locally, the shared
 flight continues to remote. Callers still awaiting it receive the remote result.

@@ -171,6 +171,7 @@ struct LoadEntryTests {
         } transform: { _, entries in entries }
         await composition.load()
         #expect(value(composition.latest)?[1] == Entry(1, "new"))
+        try await bucket.load()
         try await bucket.put(Entry(1, "edited"))
         await until { value(composition.latest)?[1] == Entry(1, "edited") }
         var iterator = composition.makeAsyncIterator()
@@ -280,8 +281,10 @@ struct LoadEntryTests {
 
     @Test("Relationships can use cached entries and require an entry loader for a fetch")
     func relationshipWithoutLoader() async throws {
-        let bucket = Bucket(IndexedKey<Int, Entry>("cached-only"))
-        try await bucket.put(Entry(1, "cached"))
+        let bucket = Bucket(IndexedKey<Int, Entry>("cached-only")) {
+            LocalSource { [Entry(1, "cached")] }
+        }
+        try await bucket.load()
         let composition = Composition {
             Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
         } transform: { _, entries in entries }

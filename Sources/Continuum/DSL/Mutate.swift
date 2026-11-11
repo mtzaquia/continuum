@@ -41,14 +41,23 @@ public typealias MutationAction<Space: ContinuumKeySpace> =
 /// Edits the snapshot owned by a running bucket mutation.
 @MainActor
 public final class Mutation<Space: ContinuumKeySpace> {
+    /// The successful outcome of the remote step paired with an optimistic edit.
+    public enum RemoteOutcome<Value: Sendable>: Sendable {
+        /// Keeps the optimistic edit.
+        case acknowledged
+
+        /// Applies the returned entry or snapshot and persists the resulting snapshot.
+        case updated(Value)
+    }
+
     private struct Edit<Response> {
         let snapshot: Space.Snapshot?
-        var confirmed: ((Response) -> Space.Snapshot?)? = nil
+        let confirmed: (Response) -> Space.Snapshot?
     }
 
     private let keySpace: Space
     private let read: () -> Space.Snapshot?
-    private let checkOwnership: () throws -> Void
+    private let ownsState: () -> Bool
     private let publish: (Space.Snapshot?) async throws -> Void
     private let remoteStarted: () -> Void
     private var isActive = true
@@ -57,104 +66,56 @@ public final class Mutation<Space: ContinuumKeySpace> {
     init(
         keySpace: Space,
         read: @escaping () -> Space.Snapshot?,
-        checkOwnership: @escaping () throws -> Void,
+        ownsState: @escaping () -> Bool,
         publish: @escaping (Space.Snapshot?) async throws -> Void,
         remoteStarted: @escaping () -> Void
     ) {
         self.keySpace = keySpace
         self.read = read
-        self.checkOwnership = checkOwnership
+        self.ownsState = ownsState
         self.publish = publish
         self.remoteStarted = remoteStarted
     }
 
     /// The complete snapshot, or `nil` while the bucket is unavailable.
-    public var snapshot: Space.Snapshot? { isActive ? read() : nil }
+    public var snapshot: Space.Snapshot? { isActive && ownsState() ? read() : nil }
 
-    /// Edits an established snapshot and optionally awaits remote confirmation.
-    /// The remote action still runs when the snapshot is unavailable. Return
-    /// `nil` from the edit to clear the snapshot, or an empty collection to keep
-    /// an established empty snapshot.
-    @_disfavoredOverload
+    /// Edits an established snapshot and optionally runs a remote step.
+    ///
+    /// Return `nil` from the edit to clear the snapshot, or an empty collection
+    /// to keep an established empty snapshot. The remote step runs after the
+    /// optimistic write. Return `.acknowledged` to keep the edit or `.updated`
+    /// with the snapshot returned by the server. An unavailable snapshot skips
+    /// publication and still runs the remote step.
     public func update(
         _ edit: (Space.Snapshot) throws -> Space.Snapshot?,
-        remotely: (() async throws -> Void)? = nil
+        remote: (@MainActor () async throws -> RemoteOutcome<Space.Snapshot>)? = nil
     ) async throws {
         try await apply({ snapshot in
             guard let snapshot else { return nil }
-            return Edit(snapshot: try edit(snapshot))
-        }, remotely: remotely)
+            return Edit(snapshot: try edit(snapshot), confirmed: { .some($0) })
+        }, remote: remote)
     }
 
-    /// Publishes an optimistic edit, then replaces it with the server snapshot.
-    /// An unavailable snapshot skips both publications and still runs the endpoint.
-    public func update(
-        _ edit: (Space.Snapshot) throws -> Space.Snapshot?,
-        remotely: () async throws -> Space.Snapshot
-    ) async throws {
-        try await withoutActuallyEscaping(remotely) { remotely in
-            try await apply({ snapshot in
-                guard let snapshot else { return nil }
-                return Edit(snapshot: try edit(snapshot), confirmed: { .some($0) })
-            }, remotely: remotely)
-        }
-    }
-
-    /// Explicitly establishes, replaces, or clears the complete snapshot.
-    @_disfavoredOverload
-    public func replace(
-        with snapshot: Space.Snapshot?,
-        remotely: (() async throws -> Void)? = nil
-    ) async throws {
-        try await apply({ _ in Edit(snapshot: snapshot) }, remotely: remotely)
-    }
-
-    /// Publishes the supplied snapshot, then replaces it with the server snapshot.
-    public func replace(
-        with snapshot: Space.Snapshot?,
-        remotely: () async throws -> Space.Snapshot
-    ) async throws {
-        try await withoutActuallyEscaping(remotely) { remotely in
-            try await apply({ _ in
-                Edit(snapshot: snapshot, confirmed: { .some($0) })
-            }, remotely: remotely)
-        }
-    }
-
-    /// Edits one established indexed entry and optionally awaits confirmation.
-    /// The remote action still runs if the entry or snapshot is unavailable.
-    @_disfavoredOverload
+    /// Edits one established indexed entry and optionally runs a remote step.
+    ///
+    /// Return `.acknowledged` from the remote step to keep the optimistic edit,
+    /// or `.updated` to apply the server's entry, including a changed index.
+    /// The remote step still runs if the entry or snapshot is unavailable.
     public func update<ID, Value>(
         id: ID,
         _ edit: (Value) throws -> Value,
-        remotely: (() async throws -> Void)? = nil
+        remote: (@MainActor () async throws -> RemoteOutcome<Value>)? = nil
     ) async throws where Space == IndexedKey<ID, Value> {
         try await apply({ snapshot in
             guard let snapshot, let value = keySpace.value(for: id, in: snapshot) else { return nil }
             let updated = try edit(value)
-            return Edit(snapshot: replacing(id, with: updated, in: snapshot))
-        }, remotely: remotely)
-    }
-
-    /// Edits one established indexed entry, then persists the server's value.
-    /// The returned value may change the entry's index. Other entries retain
-    /// their positions. An unavailable entry or snapshot skips both edits.
-    public func update<ID, Value>(
-        id: ID,
-        _ edit: (Value) throws -> Value,
-        remotely: () async throws -> Value
-    ) async throws where Space == IndexedKey<ID, Value> {
-        try await withoutActuallyEscaping(remotely) { remotely in
-            try await apply({ snapshot in
-                guard let snapshot, let value = keySpace.value(for: id, in: snapshot) else { return nil }
-                let updated = try edit(value)
-                let optimistic = replacing(id, with: updated, in: snapshot)
-                let optimisticID = keySpace.input(for: updated)
-                return Edit(snapshot: optimistic, confirmed: { confirmed in
-                    self.replacing(optimisticID, with: confirmed, in: optimistic)
-                })
-            }, remotely: remotely)
-        }
+            let optimistic = replacing(id, with: updated, in: snapshot)
+            let optimisticID = keySpace.input(for: updated)
+            return Edit(snapshot: optimistic, confirmed: { confirmed in
+                self.replacing(optimisticID, with: confirmed, in: optimistic)
+            })
+        }, remote: remote)
     }
 
     private func replacing(
@@ -166,7 +127,7 @@ public final class Mutation<Space: ContinuumKeySpace> {
 
     private func apply<Response>(
         _ prepare: (Space.Snapshot?) throws -> Edit<Response>?,
-        remotely: (() async throws -> Response)?
+        remote: (@MainActor () async throws -> RemoteOutcome<Response>)?
     ) async throws {
         try requireActive()
         guard !isUpdating else { throw ContinuumError.concurrentMutationEdit }
@@ -174,21 +135,29 @@ public final class Mutation<Space: ContinuumKeySpace> {
         defer { isUpdating = false }
 
         let edit = try prepare(read())
-        if let edit { try await publish(edit.snapshot) }
-        if let remotely {
+        if let edit {
+            try await publish(edit.snapshot)
             try requireActive()
-            remoteStarted()
-            let response = try await remotely()
-            try requireActive()
-            if let confirm = edit?.confirmed {
-                try await publish(confirm(response))
-            }
+        }
+        guard let remote else { return }
+        try requireActive()
+        remoteStarted()
+
+        let outcome = try await remote()
+        try Task.checkCancellation()
+        // Reset revokes the snapshot edit while the endpoint's outcome still belongs to its caller.
+        guard isActive, ownsState(), let edit, case let .updated(response) = outcome else { return }
+        do {
+            try await publish(edit.confirmed(response))
+        } catch {
+            try Task.checkCancellation()
+            if ownsState() { throw error }
         }
     }
 
     private func requireActive() throws {
-        guard isActive else { throw CancellationError() }
-        try checkOwnership()
+        try Task.checkCancellation()
+        guard isActive, ownsState() else { throw CancellationError() }
     }
 
     func finish() throws {

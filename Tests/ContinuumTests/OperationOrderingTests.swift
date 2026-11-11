@@ -10,7 +10,8 @@ struct OperationOrderingTests {
             LocalSource { await disk.value } persist: { await disk.write($0) }
             RemoteSource { 1 }
         }
-        try await bucket.put(9)
+        await disk.write(9)
+        try await bucket.load()
         let load = Task { try await bucket.load(using: .remote) }
         await disk.writeGate.started()
         let reset = Task { try await bucket.reset() }
@@ -31,7 +32,8 @@ struct OperationOrderingTests {
             LocalSource { await disk.value } persist: { await disk.write($0) }
             RemoteSource { 7 }
         }
-        try await bucket.put(9)
+        await disk.write(9)
+        try await bucket.load()
         let reset = Task { try await bucket.reset() }
         await disk.writeGate.started()
         let cached = Task { try await bucket.load() }
@@ -41,26 +43,86 @@ struct OperationOrderingTests {
         #expect(bucket.value == 7)
     }
 
-    @Test("A superseded store cannot overwrite a refresh or its persistence")
-    func refreshSupersedesStore() async throws {
+    @Test("A forced refresh waits for an earlier mutation and reads its server result")
+    func forcedRefreshWaitsForMutation() async throws {
         let gate = OperationGate<Int>()
         let disk = OrderedDisk()
+        let (refreshRequested, requested) = AsyncStream<Void>.makeStream()
         let bucket = Bucket(Key<Int>("ordering.store-refresh")) {
-            LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource { 9 }
+            LocalSource { 0 } persist: { await disk.write($0) }
+            RemoteSource { await disk.value ?? -1 }
         }
+        try await bucket.load()
         let mutation = Task {
             try await bucket.mutate { mutation in
-                try await mutation.replace(with: 4) { await gate.wait() }
+                try await mutation.update { _ in 4 } remote: {
+                    let response = await gate.wait()
+                    try Task.checkCancellation()
+                    return .updated(response)
+                }
             }
         }
         await gate.started()
-        try await bucket.load(using: .remote)
+        let refresh = Task {
+            requested.yield(())
+            return try await bucket.load(using: .remote)
+        }
+        var requests = refreshRequested.makeAsyncIterator()
+        _ = await requests.next()
+        #expect(bucket.value == 4)
         await gate.finish(2)
-        await #expect(throws: CancellationError.self) { try await mutation.value }
-        #expect(bucket.value == 9)
+        try await mutation.value
+        #expect(try await refresh.value == 2)
+        #expect(bucket.value == 2)
         #expect(bucket.error == nil)
-        #expect(await disk.writes == [4, 9])
+        #expect(await disk.writes == [4, 2, 2])
+    }
+
+    @Test("A load from before reset cannot adopt the next session's snapshot")
+    func resetFencesReadReplacement() async throws {
+        let oldSource = OperationGate<Int>()
+        let source = SessionSource(old: oldSource)
+        let bucket = Bucket(Key<Int>("ordering.session-load")) {
+            RemoteSource { await source.load() }
+        }
+        let old = Task { try await bucket.load(using: .remote) }
+        await oldSource.started()
+
+        try await bucket.reset()
+        await source.switchSession()
+        #expect(try await bucket.load(using: .remote) == 2)
+
+        await oldSource.finish(1)
+        await #expect(throws: CancellationError.self) { try await old.value }
+        #expect(bucket.value == 2)
+    }
+
+    @Test("Reset prevents queued mutations from starting and lets an active remote-only handler finish")
+    func resetDiscardsQueuedMutations() async throws {
+        let endpoint = OperationGate<Void>()
+        let (queued, requested) = AsyncStream<Void>.makeStream()
+        let bucket = Bucket(Key<Int>("ordering.reset-queued"))
+        var startedQueuedMutation = false
+
+        let running = Task {
+            try await bucket.mutate { _ in
+                await endpoint.wait()
+                try Task.checkCancellation()
+            }
+        }
+        await endpoint.started()
+        let pending = Task {
+            requested.yield(())
+            try await bucket.mutate { _ in startedQueuedMutation = true }
+        }
+        var requests = queued.makeAsyncIterator()
+        _ = await requests.next()
+
+        try await bucket.reset()
+        await endpoint.finish(())
+        try await running.value
+        await #expect(throws: CancellationError.self) { try await pending.value }
+        #expect(!startedQueuedMutation)
     }
 
     @Test("Cancellation rolls back memory and disk")
@@ -74,10 +136,10 @@ struct OperationOrderingTests {
         try await bucket.load()
         let mutation = Task {
             try await bucket.mutate { mutation in
-                try await mutation.update { _ in 4 } remotely: {
+                try await mutation.update { _ in 4 } remote: {
                     _ = await gate.wait()
                     try Task.checkCancellation()
-                    return 2
+                    return .updated(2)
                 }
             }
         }
@@ -106,7 +168,9 @@ struct OperationOrderingTests {
         try await bucket.load()
         let mutation = Task {
             try await bucket.mutate { mutation in
-                try await mutation.update { $0 + [2] } remotely: { [1, await gate.wait()] }
+                try await mutation.update { $0 + [2] } remote: {
+                    .updated([1, await gate.wait()])
+                }
             }
         }
         await gate.started()
@@ -132,17 +196,19 @@ struct OperationOrderingTests {
         try await bucket.load()
         let first = Task {
             try await bucket.mutate { mutation in
-                try await mutation.update { _ in 4 } remotely: {
+                try await mutation.update { _ in 4 } remote: {
                     await gate.wait()
                     try Task.checkCancellation()
-                    return 4
+                    return .updated(4)
                 }
             }
         }
         await gate.started()
         let second = Task {
             try await bucket.mutate { mutation in
-                try await mutation.update { _ in 5 } remotely: { 5 }
+                try await mutation.update { _ in 5 } remote: {
+                    .updated(5)
+                }
             }
         }
         first.cancel()
@@ -179,10 +245,16 @@ struct OperationOrderingTests {
     @Test("Cached-then-remote waits for a pending mutation")
     func refreshWaitsForMutation() async throws {
         let gate = OperationGate<Int>()
-        let bucket = Bucket(Key<Int>("ordering.cached-remote")) { RemoteSource { 9 } }
+        let bucket = Bucket(Key<Int>("ordering.cached-remote")) {
+            LocalSource { 0 }
+            RemoteSource { 9 }
+        }
+        try await bucket.load()
         let mutation = Task {
             try await bucket.mutate { mutation in
-                try await mutation.replace(with: 4) { await gate.wait() }
+                try await mutation.update { _ in 4 } remote: {
+                    .updated(await gate.wait())
+                }
             }
         }
         await gate.started()
@@ -201,7 +273,9 @@ struct OperationOrderingTests {
         let bucket = Bucket(Key<Int>("ordering.retry")) { RemoteSource { await gate.wait() } }
         await #expect(throws: Failure.self) {
             try await bucket.mutate { mutation in
-                try await mutation.replace(with: 1) { throw Failure.expected }
+                try await mutation.update { _ in 1 } remote: {
+                    throw Failure.expected
+                }
             }
         }
         let refresh = Task { try await bucket.load(using: .remote) }
@@ -235,6 +309,20 @@ private actor PageDisk {
     func write(_ value: [Int]?) async {
         if value == nil { await resetGate.wait() }
         writes.append(value)
+    }
+}
+
+private actor SessionSource {
+    let old: OperationGate<Int>
+    private var newSession = false
+
+    init(old: OperationGate<Int>) { self.old = old }
+
+    func switchSession() { newSession = true }
+
+    func load() async -> Int {
+        if newSession { return 2 }
+        return await old.wait()
     }
 }
 

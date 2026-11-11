@@ -16,12 +16,14 @@ struct MutationTests {
                 case let .rename(id, name):
                     try await mutation.update(id: id) { card in
                         Card(id: card.id, name: name)
-                    } remotely: {
-                        await service.rename(id, to: name)
+                    } remote: {
+                        .updated(await service.rename(id, to: name))
                     }
                 case let .terminate(id):
-                    try await mutation.update { $0.filter { $0.id != id } } remotely: {
+                    try await mutation.update { $0.filter { $0.id != id } } remote: {
+                        try Task.checkCancellation()
                         await service.terminate(id)
+                        return .acknowledged
                     }
                 case .request:
                     await service.request()
@@ -53,6 +55,24 @@ struct MutationTests {
             .terminate(2),
             .request,
         ])
+    }
+
+    @Test("A returned optional nil is an established snapshot")
+    func optionalServerSnapshot() async throws {
+        let bucket = Bucket(Key<Int?>("optional-response")) { LocalSource { .some(1) } }
+        try await bucket.load()
+
+        try await bucket.mutate { mutation in
+            try await mutation.update { _ in .some(2) } remote: {
+                .updated(nil)
+            }
+        }
+
+        #expect(bucket.isLoaded)
+        guard case .result(.success(nil)) = bucket.latest else {
+            Issue.record("Expected the server's nil value as a successful snapshot")
+            return
+        }
     }
 
     @Test("Each selected partition owns the handler and its snapshot")

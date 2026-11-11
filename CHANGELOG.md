@@ -2,6 +2,15 @@
 
 ## Unreleased (target 2.0.0)
 
+- Removed `mutation.replace(with:)`. Establish a snapshot with `load()` and
+  edit it with `mutation.update`.
+- `mutation.update` runs the endpoint in its `remote:` trailing closure.
+  Return `.acknowledged` to keep the optimistic edit or `.updated(value)`
+  to apply the server value.
+- Forced remote loads wait for pending mutations and resets before replacing
+  reads. Reset clears the snapshot and revokes ownership before suspending.
+  Running mutations can finish their requests while their old snapshot edits
+  are discarded.
 - One `Mutate` handler and `mutate(_:)` replace `Store`, `Remove`, and their
   bucket methods. Snapshot edits publish and persist optimistically. Returned
   server entries and snapshots take precedence.

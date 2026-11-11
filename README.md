@@ -70,9 +70,10 @@ from a bucket that has never loaded.
 
 The default `.cached` policy returns memory or tries local sources before
 remote. Use `.cachedThenRemote` to show cache while refreshing, or `.remote`
-to supersede work and fetch fresh data. Add `staleAfter: .seconds(300)` to a
-bucket initializer to have cached snapshot loads refresh stale data while
-keeping existing values readable. [Choose a loading policy →](docs/loading.md)
+to wait for pending writes and fetch straight from the server. Add
+`staleAfter: .seconds(300)` to a bucket initializer to have cached snapshot
+loads refresh stale data while keeping existing values readable.
+[Choose a loading policy →](docs/loading.md)
 
 An established snapshot stays available as a successful `latest` after a failed
 refresh or rollback. Observe `error` or `state.error` for the operation failure.

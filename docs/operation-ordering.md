@@ -10,20 +10,20 @@ suspension points.
 | Incoming operation | Pending work |
 | --- | --- |
 | `mutate` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
-| `reset` | Supersedes queued and running mutations, loads, entry fetches, and pages. Clears memory before awaiting local deletion. |
+| `reset` | Clears memory and revokes ownership from earlier work before suspending. Cancels reads and queued mutations. A running mutation can finish its request, while its edits lose ownership of the snapshot. |
 | `.cached` with fresh memory | Returns the current snapshot immediately, including optimistic values. Without `staleAfter`, memory stays fresh indefinitely. |
 | `.cached` without fresh memory | Waits for pending mutations/reset, rechecks memory, then shares or starts a load. Configured freshness requires remote validation of stale or unvalidated data. |
 | `.cachedThenRemote` | Waits for pending mutations/reset, then shares or starts a load that reaches remote. |
-| `.remote` | Supersedes queued and running mutations, loads, entry fetches, and pages. |
+| `.remote` | Waits for pending mutations and resets, then supersedes active reads and starts a fresh remote load. |
 | `load(id:using:)` | Cached hits return immediately. Otherwise waits for mutations and initial loading, then shares work per ID unless `.remote` replaces it. Replacements use the mutation queue and cancel pending pages, preserving the cursor for retry. |
 | `loadNext()` | Waits for mutations/reset and initial loading, then coalesces requests for the current cursor. |
 
 A mutation checks ownership before publishing or persisting a server response.
 A page captures its base after pending mutations finish.
 
-A forced remote load retains the current memory snapshot while it runs. If
-that snapshot was optimistic, it remains readable until the refresh resolves;
-superseding a mutation does not confirm or undo its remote side effects.
+A forced remote load retains the current snapshot while it waits and fetches.
+After a reset, callers awaiting earlier reads receive `CancellationError` even
+if a new load has already started.
 
 ## Finish persistence in order
 
@@ -48,13 +48,16 @@ to restore persistence. Restoration can run despite caller cancellation. The
 call throws `CancellationError` after cleanup, without recording cancellation
 as `error`.
 
-If reset or a forced remote load has superseded the operation, its rollback is
-skipped so it cannot overwrite the replacement. Cancellation cannot guarantee
-that a remote server rejected a request it already received.
+Reset revokes ownership from the running mutation, so its late result can
+neither write to the snapshot nor roll it back. An endpoint already in progress
+can return success or failure to the mutation's caller. A paired endpoint is
+skipped if reset revokes ownership before it starts. Explicit caller
+cancellation still reaches the request and may leave its server outcome
+unknown.
 
 Load flights are shared work: cancellation of one awaiting load caller does not
 cancel the underlying source flight. Reset, mutation, or forced remote loading
-supersedes source work according to the table above.
+supersedes reads according to the table above.
 
 Next: [Loading snapshots](loading.md) · [Remote mutations](remote-mutations.md) ·
 [Resource lifetime](resource-lifetime.md)

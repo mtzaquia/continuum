@@ -36,8 +36,8 @@ struct ObservationLifetimeTests {
 
     @Test("A slow consumer retains each result already emitted by observation")
     func slowConsumerBuffersResults() async throws {
-        let bucket = Bucket(Key<Int>("lifetime.buffer"))
-        try await bucket.put(1)
+        let bucket = Bucket(Key<Int>("lifetime.buffer")) { LocalSource { 1 } }
+        try await bucket.load()
         let (evaluated, acknowledgement) = AsyncStream<Int>.makeStream()
         let composition = Composition { Input(bucket) } transform: { value in
             acknowledgement.yield(value)

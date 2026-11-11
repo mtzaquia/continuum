@@ -85,14 +85,17 @@ struct FreshnessTests {
         #expect(try await bucket.load() == 2)
     }
 
-    @Test("Local-only and in-memory configurations ignore freshness")
+    @Test("Local-only buckets retain loaded and mutated snapshots without freshness validation")
     func localOnly() async throws {
         let local = Bucket(Key<Int>("freshness.local"), staleAfter: .zero) {
             LocalSource { 7 }
         }
         #expect(try await local.load() == 7)
         #expect(try await local.load() == 7)
-        let memory = Bucket(Key<Int>("freshness.memory"), staleAfter: .zero) {}
+        let memory = Bucket(Key<Int>("freshness.memory"), staleAfter: .zero) {
+            LocalSource { 0 }
+        }
+        try await memory.load()
         try await memory.put(9)
         #expect(try await memory.load() == 9)
     }
@@ -341,7 +344,9 @@ struct FreshnessTests {
         time.advance(by: .seconds(10))
         let mutation = Task {
             try await bucket.mutate { mutation in
-                try await mutation.update { _ in 7 } remotely: { try await gate.load() }
+                try await mutation.update { _ in 7 } remote: {
+                    .updated(try await gate.load())
+                }
             }
         }
         await until { gate.pending != nil }

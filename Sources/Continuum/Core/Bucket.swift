@@ -68,10 +68,10 @@ public final class Bucket<
     @ObservationIgnored
     private var partitionStorage: [Scope.Partition: BucketPartition<Space, Operation>] = [:]
 
-    /// Creates an observable in-memory data bucket.
+    /// Creates an observable bucket without loading sources.
     ///
-    /// This bucket has no loading sources. Calling ``Bucket/load(using:)``
-    /// emits a runtime warning; use mutations to manage its in-memory state.
+    /// A bucket without loading sources can run remote-only mutation actions.
+    /// Supply a ``LocalSource`` or ``RemoteSource`` to establish a snapshot.
     ///
     /// - Parameter keySpace: The key whose atomic snapshot this bucket owns.
     public convenience init(_ keySpace: Space)
@@ -258,13 +258,12 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// the shared refresh completes. Otherwise it shares active work or tries
     /// local sources before remote. A cached-then-remote load publishes available
     /// cache data and returns after its required remote phase. A remote load
-    /// supersedes active work and starts directly at the remote source. Before
-    /// a remote result enters memory,
-    /// writable local sources persist it in declaration order. A remote load
-    /// also supersedes pending mutations. Cached-then-remote loads, and cached
-    /// loads without fresh memory, wait for pending mutations and resets.
-    /// Loading a bucket with no local or remote source emits a runtime warning;
-    /// such a bucket is intended to be used as an in-memory bucket.
+    /// waits for mutations and resets, then supersedes active reads and starts
+    /// directly at the remote source. Writable local sources persist remote
+    /// results in declaration order before publication. Cached-then-remote
+    /// loads and cached loads without fresh memory also wait for mutations and
+    /// resets.
+    /// Loading a bucket with no local or remote source emits a runtime warning.
     ///
     /// - Parameter policy: The way established and local snapshots should be
     ///   treated.
@@ -283,8 +282,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     ///
     /// The configured ``Mutate`` handler receives the operation and can
     /// optimistically edit the snapshot. Buckets without a custom handler
-    /// accept a ``MutationAction`` closure. A failure rolls back owned edits;
-    /// reset and forced remote loads supersede pending mutations.
+    /// accept a ``MutationAction`` closure. A failure rolls back owned edits.
+    /// Reset cancels queued mutations and revokes a running handler's ability
+    /// to publish or persist edits while it finishes its request.
     func mutate(_ operation: Operation) async throws {
         try await storage.mutate(operation)
     }
@@ -294,7 +294,8 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     ///
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
-    /// Observable memory resets before writable local sources receive `nil` in
+    /// Reset revokes ownership from earlier work and clears observable memory
+    /// before suspending. Writable local sources receive `nil` in
     /// declaration order, after already executing local writes finish. A
     /// failure restores the previous observable state, attempts to restore
     /// local persistence, and becomes ``error``. Caller cancellation restores

@@ -1,4 +1,5 @@
 @testable import Continuum
+import Testing
 
 extension Bucket where Scope == UnpartitionedBucketScope, Operation == MutationAction<Space> {
     func put(_ value: Space.Value) async throws {
@@ -16,9 +17,10 @@ extension Bucket where Scope == UnpartitionedBucketScope, Operation == MutationA
 
 extension BucketPartition where Operation == MutationAction<Space> {
     func put(_ value: Space.Value) async throws {
+        try #require(isLoaded)
         let key = keySpace
         try await mutate { mutation in
-            try await mutation.replace(with: key.storing(value, in: mutation.snapshot))
+            try await mutation.update { key.storing(value, in: $0) }
         }
     }
 
@@ -30,6 +32,6 @@ extension BucketPartition where Operation == MutationAction<Space> {
     }
 
     func delete() async throws where Space.Input == SingletonInput {
-        try await mutate { try await $0.replace(with: nil) }
+        try await mutate { try await $0.update { _ in nil } }
     }
 }

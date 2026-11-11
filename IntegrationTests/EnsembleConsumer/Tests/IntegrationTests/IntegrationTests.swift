@@ -15,6 +15,7 @@ enum Failure: Error { case test }
 struct IntegrationTests {
     @MainActor @Test func directBucketBinding() async throws {
         let bucket = Bucket(Key<Int>("ensemble.direct")) {
+            LocalSource { 7 }
             RemoteSource { throw Failure.test }
         }
         let model = Consumer(bucket) { _ = try? await bucket.load(using: .remote) }
@@ -23,7 +24,7 @@ struct IntegrationTests {
         data.connect()
         for _ in 0..<10 { await Task.yield() }
         #expect(data.phase.kind == .empty)
-        try await bucket.mutate { try await $0.replace(with: 7) }
+        try await bucket.load()
         if case .result(.success(7))? = await received.next() {} else {
             Issue.record("The initial snapshot must be the first update")
         }
@@ -62,9 +63,10 @@ struct IntegrationTests {
 
     @MainActor @Test func retainedBucketInComposition() async throws {
         let bucket = Bucket(Key<Int>("ensemble.required")) {
+            LocalSource { 7 }
             RemoteSource { throw Failure.test }
         }
-        try await bucket.mutate { try await $0.replace(with: 7) }
+        try await bucket.load()
         let sibling = Source()
         sibling.update = .result(.success(1))
         let composition = Composition {

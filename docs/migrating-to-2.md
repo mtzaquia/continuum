@@ -28,13 +28,14 @@ Replace `Store` and `Remove` with one `Mutate` declaration in the bucket
 builder. The handler's first parameter determines the operation type accepted
 by `mutate(_:)`. Use `mutation.update` for an established snapshot and
 `mutation.update(id:)` for an indexed entry. Pair an edit with its endpoint
-using `remotely:`. The endpoint can return the authoritative entry or snapshot
-for Continuum to publish and persist.
+using the `remote:` trailing closure. Return `.acknowledged` to keep the
+optimistic edit, or `.updated(value)` to publish and persist a server entry
+or snapshot. This closure replaces the beta.5 `remotely:` overloads.
 
 A bucket without a typed handler accepts a closure through `mutate(_:)`.
-Use `mutation.replace(with:)` to deliberately establish a complete snapshot
-or clear it with `nil`. Indexed edits can return an empty array to keep an
-established empty collection. [Mutation guide](remote-mutations.md)
+Establish the initial snapshot with `load()`. Use `LocalSource` for a snapshot
+that starts in memory. An edit can return `nil` to clear its snapshot, or an
+empty array to keep an established empty collection. [Mutation guide](remote-mutations.md)
 
 When spelling the generic types directly, `Bucket` and `BucketPartition`
 now take the operation type as their last argument. The existing bucket

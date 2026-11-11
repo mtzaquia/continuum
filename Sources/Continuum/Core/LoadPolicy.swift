@@ -45,12 +45,12 @@ public enum LoadPolicy: Sendable {
     /// snapshot. Pending mutations and resets complete before this load starts.
     case cachedThenRemote
 
-    /// Supersedes active source work and loads directly from the remote source.
+    /// Waits for pending mutations and resets, then loads directly from the
+    /// remote source, superseding active read work.
     ///
-    /// This policy requires a ``RemoteSource`` and also supersedes queued and
-    /// running mutations. Obsolete mutations cannot publish or roll back state.
-    /// Repeated remote loads use latest-wins behavior. Results and errors from
-    /// superseded source work cannot replace the current snapshot or state.
+    /// This policy requires a ``RemoteSource``. The latest remote flight wins.
+    /// Results and errors from superseded reads cannot replace the current
+    /// snapshot or state.
     case remote
 }
 

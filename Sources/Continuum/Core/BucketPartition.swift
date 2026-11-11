@@ -82,6 +82,7 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     }
 
     private struct InFlight {
+        let epoch: UInt
         let generation: UInt
         let operationID: String
         let task: Task<LoadOutcome, any Error>
@@ -93,6 +94,7 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     }
 
     private struct NextPageFlight {
+        let epoch: UInt
         let generation: UInt
         let identifier: UInt
         let operationID: String
@@ -103,6 +105,12 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
         let generation: UInt
         let identifier: UInt
         let result: Result<Space.Snapshot, any Error>
+    }
+
+    private struct QueuedMutation {
+        let kind: BucketMutationKind
+        let operationID: String
+        let task: Task<Void, any Error>
     }
 
     /// The key that establishes this bucket's identity and snapshot behavior.
@@ -174,6 +182,9 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
 
     @ObservationIgnored
     private var mutationTasks: [UInt: Task<Void, any Error>] = [:]
+
+    @ObservationIgnored
+    private var runningMutation: UInt?
 
     @ObservationIgnored
     private var mutationIdentifier: UInt = 0
@@ -349,13 +360,12 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     /// the shared refresh completes. Otherwise it shares active work or tries
     /// local sources before remote. A cached-then-remote load publishes available
     /// cache data and returns after its required remote phase. A remote load
-    /// supersedes active work and starts directly at the remote source. Before
-    /// a remote result enters memory,
-    /// writable local sources persist it in declaration order. A remote load
-    /// also supersedes pending mutations. Cached-then-remote loads, and cached
-    /// loads without fresh memory, wait for pending mutations and resets.
-    /// Loading a bucket with no local or remote source emits a runtime warning;
-    /// such a bucket is intended to be used as an in-memory bucket.
+    /// waits for mutations and resets, then supersedes active reads and starts
+    /// directly at the remote source. Writable local sources persist remote
+    /// results in declaration order before publication. Cached-then-remote
+    /// loads and cached loads without fresh memory also wait for mutations and
+    /// resets.
+    /// Loading a bucket with no local or remote source emits a runtime warning.
     ///
     /// - Parameter policy: The way established and local snapshots should be
     ///   treated.
@@ -399,8 +409,9 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     /// Runs an operation in this partition's mutation queue.
     ///
     /// The handler can publish and persist an optimistic edit before calling
-    /// a service. A failure rolls back owned edits. Reset and forced remote
-    /// loads supersede queued and running mutations.
+    /// a service. A failure rolls back owned edits. Reset cancels queued
+    /// mutations and revokes ownership from a running handler, which can
+    /// finish its request without publishing to the bucket.
     public func mutate(_ operation: Operation) async throws {
         let action: MutationAction<Space>
         if let handler = mutationHandler?.operation {
@@ -410,9 +421,10 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
         } else {
             throw ContinuumError.missingMutationHandler(namespace: keySpace.namespace)
         }
-        try await enqueue(kind: .mutate) { [self] epoch in
-            try await performMutation(kind: .mutate, epoch: epoch, action)
+        let queued = enqueue(kind: .mutate) { [self] epoch in
+            try await performMutation(epoch: epoch, action)
         }
+        try await finish(queued)
     }
 
     /// Forgets the current snapshot, pagination state, and writable local
@@ -420,7 +432,8 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     ///
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
-    /// Observable memory resets before writable local sources receive `nil` in
+    /// Reset revokes ownership from earlier work and clears observable memory
+    /// before suspending. Writable local sources receive `nil` in
     /// declaration order, after already executing local writes finish. A
     /// failure restores the previous observable state, attempts to restore
     /// local persistence, and becomes ``error``. Caller cancellation restores
@@ -430,14 +443,41 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     ///   and source-generation checks prevent superseded work from publishing.
     public func reset() async throws {
         try Task.checkCancellation()
-        supersedeMutations()
-        try await enqueue(kind: .resetLocal) { [self] epoch in
-            try await performMutation(kind: .resetLocal, epoch: epoch) { mutation in
-                if case .reset = latestUpdate { compositionResetRevision &+= 1 }
-                clearPagination()
-                try await mutation.replace(with: nil)
+        let queued = ContinuumLogContext.withOperation {
+            let previousSnapshot = snapshot
+            let previousUpdate = latestUpdate
+            let previousRemoteLoad = lastRemoteLoad
+            let previousPagination = paginationCheckpoint
+
+            logSupersededWork(replacement: BucketMutationKind.resetLocal.rawValue)
+            supersedeMutations()
+            supersedeSourceWork()
+            let ownership = MutationOwnership(epoch: mutationEpoch, generation: generation)
+            if case .reset = previousUpdate { compositionResetRevision &+= 1 }
+            publishMutation(nil)
+            clearPagination()
+
+            return enqueue(kind: .resetLocal) { [self] _ in
+                do {
+                    try requireCurrent(ownership)
+                    try await persistence.persist(nil)
+                    try requireCurrent(ownership)
+                } catch {
+                    guard ownsState(ownership) else { throw CancellationError() }
+                    let failure: any Error = Task.isCancelled ? CancellationError() : error
+                    await rollback(
+                        to: previousSnapshot,
+                        previousUpdate: previousUpdate,
+                        after: failure,
+                        ownership: ownership,
+                        lastRemoteLoad: previousRemoteLoad,
+                        restoring: previousPagination
+                    )
+                    throw failure
+                }
             }
         }
+        try await finish(queued)
     }
 }
 
@@ -579,30 +619,37 @@ private extension BucketPartition {
         guard ownsState(ownership) else { throw CancellationError() }
     }
 
-    func supersedeMutations() {
+    private func supersedeMutations() {
         mutationEpoch &+= 1
-        for task in mutationTasks.values { task.cancel() }
+        for (identifier, task) in mutationTasks where identifier != runningMutation {
+            task.cancel()
+        }
         mutationTasks.removeAll()
         mutationTail = nil
+        runningMutation = nil
     }
 
-    func finishMutation(_ identifier: UInt) {
+    private func finishMutation(_ identifier: UInt) {
         mutationTasks[identifier] = nil
+        if runningMutation == identifier { runningMutation = nil }
         if mutationIdentifier == identifier { mutationTail = nil }
     }
 
     func waitForMutations() async throws {
+        let epoch = mutationEpoch
+        try Task.checkCancellation()
         while let pending = mutationTail {
             _ = await pending.result
             try Task.checkCancellation()
+            guard mutationEpoch == epoch else { throw CancellationError() }
         }
     }
 
     private func enqueue(
         kind: BucketMutationKind,
         operation: @escaping @MainActor (UInt) async throws -> Void
-    ) async throws {
-        try await ContinuumLogContext.withOperation {
+    ) -> QueuedMutation {
+        ContinuumLogContext.withOperation {
             let epoch = mutationEpoch
             let predecessor = mutationTail
             continuumDebug(
@@ -620,17 +667,25 @@ private extension BucketPartition {
                 if let predecessor {
                     _ = await predecessor.result
                 }
-                try Task.checkCancellation()
-
                 guard let self, mutationEpoch == epoch else {
                     throw CancellationError()
                 }
 
+                // Reset has already cleared memory and owns its cancellation rollback.
+                if kind != .resetLocal { try Task.checkCancellation() }
+                if kind == .mutate { runningMutation = identifier }
                 try await operation(epoch)
             }
             mutationTail = task
             mutationTasks[identifier] = task
+            return QueuedMutation(kind: kind, operationID: currentOperationID, task: task)
+        }
+    }
 
+    private func finish(_ queued: QueuedMutation) async throws {
+        try await ContinuumLogContext.withOperationID(queued.operationID) {
+            let task = queued.task
+            let kind = queued.kind
             do {
                 try await withTaskCancellationHandler {
                     try await task.value
@@ -667,27 +722,22 @@ private extension BucketPartition {
     }
 
     private func performMutation(
-        kind: BucketMutationKind,
         epoch: UInt,
         _ operation: (Mutation<Space>) async throws -> Void
     ) async throws {
-        logSupersededWork(replacement: kind.rawValue)
+        logSupersededWork(replacement: BucketMutationKind.mutate.rawValue)
         supersedeSourceWork()
         loadState = LoadState(isLoaded: loadState.isLoaded)
         let ownership = MutationOwnership(epoch: epoch, generation: generation)
         let previousSnapshot = snapshot
         let previousUpdate = latestUpdate
         let previousRemoteLoad = lastRemoteLoad
-        let previousPagination = kind == .resetLocal ? paginationCheckpoint : nil
         var published = false
 
         let mutation = Mutation(
             keySpace: keySpace,
             read: { [weak self] in self?.snapshot },
-            checkOwnership: { [weak self] in
-                guard let self else { throw CancellationError() }
-                try requireCurrent(ownership)
-            },
+            ownsState: { [weak self] in self?.ownsState(ownership) == true },
             publish: { [weak self] snapshot in
                 guard let self else { throw CancellationError() }
                 try requireCurrent(ownership)
@@ -695,29 +745,28 @@ private extension BucketPartition {
                 let normalized = snapshot.map(keySpace.normalized)
                 publishMutation(normalized)
                 try await persistence.persist(normalized)
-                try requireCurrent(ownership)
             },
             remoteStarted: { [logIdentity] in
-                continuumDebug(.remoteMutationStarted(logIdentity, kind: kind))
+                continuumDebug(.remoteMutationStarted(logIdentity, kind: .mutate))
             }
         )
 
         do {
             try await operation(mutation)
             try mutation.finish()
-            try requireCurrent(ownership)
+            try Task.checkCancellation()
         } catch {
             mutation.invalidate()
-            guard ownsState(ownership) else { throw CancellationError() }
             let failure: any Error = Task.isCancelled ? CancellationError() : error
-            if published || previousPagination != nil {
+            guard ownsState(ownership) else { throw failure }
+            if published {
                 await rollback(
                     to: previousSnapshot,
                     previousUpdate: previousUpdate,
                     after: failure,
                     ownership: ownership,
                     lastRemoteLoad: previousRemoteLoad,
-                    restoring: previousPagination
+                    restoring: nil
                 )
             } else if !(failure is CancellationError) {
                 setOperationError(failure)
@@ -894,16 +943,12 @@ private extension BucketPartition {
             throw missingRemoteSource()
         }
 
-        try Task.checkCancellation()
-        if !LoadPolicy.remote.replacesActiveLoad {
+        let epoch = mutationEpoch
+        repeat {
             try await waitForMutations()
-            if let current = inFlight {
-                let outcome = try await resolve(current)
-                if outcome.origin == .remote { return outcome.snapshot }
-            }
-        }
+            guard mutationEpoch == epoch else { throw CancellationError() }
+        } while mutationTail != nil
         logSupersededWork(replacement: "remote-load")
-        supersedeMutations()
         supersedeSourceWork()
         let flight = makeRemoteFlight(remoteSource)
         return try await resolve(flight).snapshot
@@ -943,6 +988,7 @@ private extension BucketPartition {
             )
         }
         let flight = InFlight(
+            epoch: mutationEpoch,
             generation: generation,
             operationID: operationID,
             task: task
@@ -983,6 +1029,7 @@ private extension BucketPartition {
             )
         }
         let flight = InFlight(
+            epoch: mutationEpoch,
             generation: generation,
             operationID: operationID,
             task: task
@@ -1008,6 +1055,7 @@ private extension BucketPartition {
             )
         }
         let flight = InFlight(
+            epoch: mutationEpoch,
             generation: generation,
             operationID: operationID,
             task: task
@@ -1083,6 +1131,7 @@ private extension BucketPartition {
             do {
                 let outcome = try await flight.task.value
 
+                guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
                 guard generation == flight.generation else {
                     if let replacement = completedReplacement(
                         for: flight.generation
@@ -1121,6 +1170,7 @@ private extension BucketPartition {
                 publish(normalized, generation: flight.generation)
                 return normalized
             } catch {
+                guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
                 guard generation == flight.generation else {
                     if let replacement = completedReplacement(
                         for: flight.generation
@@ -1417,6 +1467,7 @@ private extension BucketPartition {
             )
         }
         let flight = NextPageFlight(
+            epoch: mutationEpoch,
             generation: generation,
             identifier: nextPageIdentifier,
             operationID: operationID,
@@ -1440,6 +1491,7 @@ private extension BucketPartition {
             do {
                 let page = try await flight.task.value
 
+                guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
                 guard generation == flight.generation else {
                     if let replacement = completedNextPageReplacement(
                         for: flight
@@ -1489,6 +1541,7 @@ private extension BucketPartition {
                 }
                 return page.snapshot
             } catch {
+                guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
                 guard generation == flight.generation else {
                     if let replacement = completedNextPageReplacement(
                         for: flight
@@ -1649,9 +1702,10 @@ public extension BucketPartition {
                         throw ContinuumError.mismatchedEntryIdentity(namespace: keySpace.namespace)
                     }
                     if wasMember {
-                        try await enqueue(kind: .loadEntry) { [self] epoch in
+                        let queued = enqueue(kind: .loadEntry) { [self] epoch in
                             try await replaceEntry(value, ownership: .init(epoch: epoch, generation: generation))
                         }
+                        try await finish(queued)
                     }
                     try Task.checkCancellation()
                     guard self.generation == generation else { throw CancellationError() }

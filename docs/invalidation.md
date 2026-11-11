@@ -6,16 +6,17 @@ Use `reset()` when a snapshot is no longer valid:
 try await posts.reset()
 ```
 
-Reset supersedes source work and mutations, clears memory and pagination, and
-sends `nil` to writable local sources. This prevents a later cached load from
-restoring stale data. If persistence fails, reset restores the previous
-availability, attempts to restore storage, and throws. An established snapshot
-is available again as `.result(.success(snapshot))`. Read the reset failure
+Reset revokes ownership from earlier work and clears memory and pagination
+before suspending. It then sends `nil` to writable local sources. This prevents
+a later cached load from restoring stale data. If persistence fails, reset
+restores the previous availability, attempts to restore storage, and throws.
+An established snapshot is available again as `.result(.success(snapshot))`. Read the reset failure
 through `error` or `state.error`. [Persistence rules →](persistence.md)
 
 ## Observe application events
 
-An `InvalidationSignal` performs the same reset for every event:
+An `InvalidationSignal` performs the same reset once the bucket receives an
+event:
 
 ```swift
 import Foundation
@@ -28,7 +29,7 @@ let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
   }
   RemoteSource { try await client.posts() }
   InvalidationSignal {
-    NotificationCenter.default.notifications(named: .accountDidChange)
+    NotificationCenter.default.notifications(named: .postsDidChange)
   }
 }
 ```
@@ -41,6 +42,17 @@ partition.
 A failed reset leaves the subscription running so a later event can retry.
 Sequence completion ends that subscription. A sequence error sets the bucket's
 `error` and ends the subscription while preserving the current availability.
+
+For a session transition that reuses a bucket, stop submitting work for the
+old session and wait for `reset()` to succeed before exposing the next session.
+An event can reach the bucket after the session has changed, leaving a window
+for an old response to commit before reset starts. Use session-scoped clients
+for requests that can finish after reset.
+
+```swift
+try await cards.reset()
+session = nextSession
+```
 
 ## Understand observable resets
 

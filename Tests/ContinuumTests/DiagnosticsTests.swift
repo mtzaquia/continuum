@@ -136,7 +136,7 @@ struct DiagnosticsTests {
         )
     }
 
-    @Test("Source-less load warnings identify in-memory buckets")
+    @Test("Load warnings identify buckets without sources")
     func sourceLessLoadWarningRendering() {
         let event = ContinuumLogEvent.loadRequestedWithoutSources(
             identity,
@@ -147,7 +147,7 @@ struct DiagnosticsTests {
         #expect(
             event.renderedMessage(operationID: "12ab34cd-more")
                 == """
-                [load][op:12AB34CD] ⚠ requested load for source-less in-memory bucket \
+                [load][op:12AB34CD] ⚠ requested load for source-less bucket \
                 bucket="posts" version=2 instance=FACE1234 policy=remote established=false
                 """
         )
