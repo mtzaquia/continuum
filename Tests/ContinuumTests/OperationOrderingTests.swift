@@ -207,7 +207,7 @@ struct OperationOrderingTests {
             return
         }
         let consumer = Task {
-            var iterator = bucket.updates().makeAsyncIterator()
+            var iterator = bucket.makeAsyncIterator()
             return await iterator.next()
         }
         await Task.yield()

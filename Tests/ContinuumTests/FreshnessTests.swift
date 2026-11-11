@@ -3,15 +3,19 @@ import Testing
 
 @Suite("Snapshot freshness", .timeLimit(.minutes(1)))
 struct FreshnessTests {
-    @Test("Original initializer signatures remain usable as function values")
-    func originalInitializerReferences() async throws {
+    @Test("Configured bucket initializers default to unlimited cache reuse")
+    func defaultFreshness() async throws {
         typealias Configuration = BucketConfiguration<Key<Int>>
-        let makeBucket: @MainActor (Key<Int>, () -> Configuration) -> ValueBucket<Int> = Bucket.init
+        let makeBucket: @MainActor (Key<Int>, () -> Configuration) -> ValueBucket<Int> = { key, configuration in
+            Bucket(key, configuration: configuration)
+        }
         let makePartitioned: @MainActor (
             Key<Int>,
             String.Type,
             @escaping @MainActor @Sendable (String) -> Configuration
-        ) -> PartitionedValueBucket<String, Int> = Bucket.init
+        ) -> PartitionedValueBucket<String, Int> = { key, partition, configuration in
+            Bucket(key, partitionedBy: partition, configuration: configuration)
+        }
         let service = Service()
         let configuration = Configuration(remoteSources: [
             RemoteSource { try await service.load() },

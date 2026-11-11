@@ -32,13 +32,7 @@ public struct Input<Value: Sendable> {
     let activate: InputActivation?
     private var materialize: (@MainActor () -> Input<Value>)? = nil
 
-    /// Observes a bucket, selected partition, or composition without loading it.
-    public init<Source: UpdateSource>(_ source: Source)
-    where Source.Snapshot == Value {
-        self.init(source, loader: nil)
-    }
-
-    /// Observes a source and forwards composition load policies to an action.
+    /// Observes a source with an optional action for explicit composition loads.
     ///
     /// The action updates the observed source; its completion alone does not
     /// establish a snapshot. An available bucket snapshot takes precedence over
@@ -46,15 +40,18 @@ public struct Input<Value: Sendable> {
     /// recovery. Other action errors remain until the next load of this input.
     public init<Source: UpdateSource>(
         _ source: Source,
-        load: @escaping @MainActor (LoadPolicy) async throws -> Void
+        load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
     ) where Source.Snapshot == Value {
-        self.init(source, loader: CompositionLoad(load, sourceOwnsOutcome: {
-            switch source.latest {
-            case .result(.failure): true
-            case .result(.success): source is any BucketSnapshotSource
-            case .reset: false
-            }
-        }))
+        let loader = load.map { action in
+            CompositionLoad(action, sourceOwnsOutcome: {
+                switch source.latest {
+                case .result(.failure): true
+                case .result(.success): source is any BucketSnapshotSource
+                case .reset: false
+                }
+            })
+        }
+        self.init(source, loader: loader)
     }
 
     /// Observes an expression without loading it.

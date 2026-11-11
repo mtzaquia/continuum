@@ -27,7 +27,7 @@ Version 1.1.0 includes compositions, direct iteration, and snapshot freshness.
 When upgrading from 1.0.x, review the [migration notes](https://github.com/mtzaquia/continuum/releases/tag/v1.1.0)
 for observation-protocol and sendable key-path changes.
 
-For changes on `main` since that release, see the [unreleased notes](CHANGELOG.md)
+For the upcoming 2.0.0 release, see the [unreleased notes](CHANGELOG.md)
 and [2.0.0 migration guide](docs/migrating-to-2.md).
 
 ## Five-minute start

@@ -72,7 +72,7 @@ struct BucketTests {
         let labels = Bucket(TestData.labels)
         let expected = Label(id: 1, text: "one")
         try await labels.store(expected)
-        var updates = labels.updates().makeAsyncIterator()
+        var updates = labels.makeAsyncIterator()
 
         guard case .result(.success(let snapshot))? = await updates.next() else {
             Issue.record("Expected the established snapshot")
@@ -85,7 +85,7 @@ struct BucketTests {
     func updatesEmitReset() async throws {
         let labels = Bucket(TestData.labels)
         try await labels.store(Label(id: 1, text: "before"))
-        var updates = labels.updates().makeAsyncIterator()
+        var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
         try await labels.reset()
@@ -111,7 +111,7 @@ struct BucketTests {
     func indexedRemovalRemainsAvailable() async throws {
         let labels = Bucket(TestData.labels)
         try await labels.store(Label(id: 1, text: "one"))
-        var updates = labels.updates().makeAsyncIterator()
+        var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
         try await labels.remove(1)
@@ -205,7 +205,7 @@ struct BucketTests {
         ) { _ in }
         let buying = labels[.buy]
         let selling = labels[.sell]
-        var buyingUpdates = buying.updates().makeAsyncIterator()
+        var buyingUpdates = buying.makeAsyncIterator()
 
         #expect(buying === labels[.buy])
 
@@ -220,7 +220,7 @@ struct BucketTests {
         #expect(selling.isLoaded == false)
     }
 
-    @Test("Bucket updates combine any number of successful snapshots")
+    @Test("A composition combines buckets and selected partitions")
     func combinedUpdates() async throws {
         let count = Bucket(TestData.count)
         let labels = Bucket(TestData.labels)
@@ -229,12 +229,14 @@ struct BucketTests {
             partitionedBy: Purpose.self
         ) { _ in }
         let subscription = subscriptions[.buy]
-        var updates = bucketUpdates(
-            observing: (count, labels, subscription),
-            transform: { count, labels, subscription in
-                "\(count):\(labels.count):\(subscription.plan)"
-            }
-        ).makeAsyncIterator()
+        let composition = Composition {
+            Input(count)
+            Input(labels)
+            Input(subscription)
+        } transform: { count, labels, subscription in
+            "\(count):\(labels.count):\(subscription.plan)"
+        }
+        var updates = composition.makeAsyncIterator()
 
         try await count.store(2)
         try await labels.store(Label(id: 1, text: "one"))
@@ -256,86 +258,6 @@ struct BucketTests {
         }
     }
 
-    @Test("Aggregate failures take precedence over unavailable sources")
-    func combinedUpdateFailurePrecedence() async {
-        let unavailable = TestUpdateSource<String>(.reset)
-        let failed = TestUpdateSource<Int>(
-            .result(.failure(TestError.failed))
-        )
-        var updates = bucketUpdates(
-            observing: (unavailable, failed),
-            transform: { _, _ in "unreachable" }
-        ).makeAsyncIterator()
-
-        guard case .result(.failure(let error))? = await updates.next() else {
-            Issue.record("Expected the dependency failure")
-            return
-        }
-        #expect(error is TestError)
-    }
-
-    @Test("Aggregate failures can preserve every dependency error")
-    func combinedUpdateFailureCollection() async {
-        let first = TestUpdateSource<Int>(
-            .result(.failure(DependencyError(id: 1)))
-        )
-        let unavailable = TestUpdateSource<String>(.reset)
-        let second = TestUpdateSource<Bool>(
-            .result(.failure(DependencyError(id: 2)))
-        )
-        var updates = bucketUpdates(
-            observing: (first, unavailable, second),
-            mapFailures: { errors in
-                CollectedDependencyErrors(
-                    ids: errors.compactMap {
-                        ($0 as? DependencyError)?.id
-                    }
-                )
-            },
-            transform: { _, _, _ in "unreachable" }
-        ).makeAsyncIterator()
-
-        guard case .result(.failure(let error))? = await updates.next(),
-              let collected = error as? CollectedDependencyErrors else {
-            Issue.record("Expected the collected dependency failures")
-            return
-        }
-        #expect(collected.ids == [1, 2])
-    }
-
-    @Test("A same-turn replacement skips aggregate reset")
-    func combinedUpdateReplacement() async {
-        let source = TestUpdateSource<Int>(.result(.success(1)))
-        var updates = bucketUpdates(
-            observing: source,
-            transform: { $0 }
-        ).makeAsyncIterator()
-        _ = await updates.next()
-
-        source.replace(2)
-
-        guard case .result(.success(let value))? = await updates.next() else {
-            Issue.record("Expected the replacement result")
-            return
-        }
-        #expect(value == 2)
-    }
-
-    @Test("Transform errors become aggregate failures")
-    func combinedUpdateTransformFailure() async {
-        let source = TestUpdateSource<Int>(.result(.success(1)))
-        var updates = bucketUpdates(
-            observing: source,
-            transform: { _ in throw TestError.failed }
-        ).makeAsyncIterator()
-
-        guard case .result(.failure(let error))? = await updates.next() else {
-            Issue.record("Expected the transform failure")
-            return
-        }
-        #expect(error is TestError)
-    }
-
     @Test("A refresh does not republish the established snapshot")
     func updatesIgnoreRefreshBookkeeping() async throws {
         let gate = SnapshotGate<[Label]>()
@@ -355,7 +277,7 @@ struct BucketTests {
         )
         _ = try await initialLoad.value
 
-        var updates = labels.updates().makeAsyncIterator()
+        var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
         let refresh = Task {
@@ -1802,33 +1724,6 @@ struct BucketTests {
         #expect(labels.isLoaded == false)
     }
 
-    @Test("The deprecated synchronous reset schedules the canonical reset")
-    func synchronousResetCompatibility() async throws {
-        let existing = Label(id: 1, text: "existing")
-        let writes = SnapshotRecorder<[Label]>()
-        let labels = Bucket(TestData.labels) {
-            LocalSource {
-                [existing]
-            } persist: { snapshot in
-                await writes.record(snapshot)
-            }
-        }
-
-        try await labels.store(existing)
-        func callLegacyReset() {
-            labels.reset()
-        }
-        callLegacyReset()
-
-        await writes.waitForSnapshots(2)
-        while labels.isLoaded {
-            await Task.yield()
-        }
-
-        #expect(await writes.snapshots == [[existing], nil])
-        #expect(labels.isLoaded == false)
-    }
-
     @Test("A memory reset prevents pending source work from publishing")
     func resetDuringLoad() async throws {
         let remote = SnapshotGate<[Label]>()
@@ -1898,7 +1793,7 @@ struct BucketTests {
             }
         }
         try await labels.store(existing)
-        var updates = labels.updates().makeAsyncIterator()
+        var updates = labels.makeAsyncIterator()
         _ = await updates.next()
 
         await #expect(throws: TestError.self) {
@@ -2027,36 +1922,6 @@ struct BucketTests {
 
 private enum TestError: Error {
     case failed
-}
-
-private struct DependencyError: Error {
-    let id: Int
-}
-
-private struct CollectedDependencyErrors: Error {
-    let ids: [Int]
-}
-
-@Observable
-private final class TestUpdateSource<Snapshot: Sendable>:
-    UpdateSource
-{
-    private var update: Update<Snapshot>
-    var latest: Update<Snapshot> { update }
-
-    init(_ update: Update<Snapshot>) {
-        self.update = update
-    }
-
-    func replace(_ snapshot: Snapshot) {
-        update = .reset
-        update = .result(.success(snapshot))
-    }
-
-    // Work around the same Swift 6.3 EarlyPerfInliner crash as Bucket's
-    // explicit deinitializer when compiling this generic observable in Release.
-    @_optimize(none)
-    deinit {}
 }
 
 private actor Counter {

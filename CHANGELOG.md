@@ -21,6 +21,11 @@
   compositions.
 - `Input(updates:)` starts its sequence subscription on first use of the
   composition. A first use that loads with `.restart` creates one subscription.
+- Retired the deprecated update aliases, `bucketUpdates`, `updates()`, and the
+  legacy reset overloads and `ResetScope`. Iterate sources directly, use
+  `Composition` to combine inputs, and call `try await reset()` to reset.
+- Configured buckets default `staleAfter` to `nil`. Source inputs accept an
+  optional `load` action through one initializer.
 
 This changes observable behavior even though existing `Update` switches still
 compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).

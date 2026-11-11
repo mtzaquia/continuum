@@ -691,15 +691,17 @@ struct CompositionTests {
         let first = Source<Int>(.result(.failure(NumberedError(number: 1))))
         let second = Source<Int>(.result(.failure(NumberedError(number: 2))))
         let third = Source<Int>(.result(.failure(NumberedError(number: 3))))
+        let unavailable = Source<Int>()
         var calls = 0
         let composition = Composition {
             Input(first)
             Input(second).optional()
+            Input(unavailable)
             Input(third)
         } mapFailures: { errors in
             calls += 1
             return MappedError(numbers: errors.compactMap { ($0 as? NumberedError)?.number })
-        } transform: { $0 + ($1 ?? 0) + $2 }
+        } transform: { first, second, _, third in first + (second ?? 0) + third }
         let mapped = try #require(composition.error as? MappedError)
         #expect(calls == 1)
         #expect(mapped.numbers == [1, 2, 3])

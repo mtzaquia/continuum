@@ -7,6 +7,21 @@ Replace `DataBucket<Value>` with `ValueBucket<Value>` and
 `PartitionedValueBucket<Partition, Value>` in type annotations. Both names
 still describe a bucket built with `Key<Value>`.
 
+## Replace deprecated entry points
+
+| Before | Use in 2.0.0 |
+| --- | --- |
+| `BucketUpdate`, `BucketUpdateSource` | `Update`, `UpdateSource` |
+| `bucket.updates()`, `partition.updates()` | Iterate the bucket or selected partition directly. |
+| `bucketUpdates(observing:transform:)` | Build and iterate a `Composition` with one `Input` per source. |
+| Synchronous `reset()`, `reset(including: .localSources)`, `ResetScope` | `try await reset()` clears memory and writable local snapshots. |
+
+Configured bucket initializers default `staleAfter` to `nil`. `Input(source)`
+and `Input(source, load:)` use one initializer with an optional load action.
+Direct calls keep their existing spelling. If you pass an initializer as a
+function value, use the full signature or wrap the call in a closure to use
+the defaults.
+
 ## Observe refresh errors separately
 
 In 1.1.0 a failed collection refresh published `.result(.failure(error))` even

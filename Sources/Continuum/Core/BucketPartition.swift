@@ -129,7 +129,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     private var loadState = LoadState()
     private var paginationState = PaginationState()
 
-    private(set) var latestUpdate: Update<Space.Snapshot> = .reset
+    private var latestUpdate: Update<Space.Snapshot> = .reset
     private(set) var compositionResetRevision: UInt = 0
 
     @ObservationIgnored
@@ -351,27 +351,6 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     /// failure when no snapshot is available.
     public var latest: Update<Space.Snapshot> { latestUpdate }
 
-    /// Creates a sequence of snapshot results and reset transitions.
-    ///
-    /// The sequence immediately emits an established snapshot or a collection
-    /// load failure when no snapshot is available.
-    /// An untouched or loading bucket without a snapshot remains silent, while
-    /// an established empty snapshot emits a successful empty value. After a
-    /// result, reset emits ``Update/reset`` only while the bucket remains
-    /// unavailable; initial and repeated unavailable states remain silent. A
-    /// replacement available before observation resumes emits its result
-    /// directly.
-    ///
-    /// Creating the sequence does not start a load. Each call creates an
-    /// independent observation that ends when iteration is cancelled. The
-    /// observation retains its source until termination. Emitted updates use
-    /// an unbounded buffer; slow consumers can retain older snapshots. State
-    /// changes before observation resumes may be coalesced.
-    @available(*, deprecated, message: "Iterate the bucket or selected partition directly instead of calling updates().")
-    public func updates() -> AsyncStream<Update<Space.Snapshot>> {
-        makeSourceObservation(self).stream
-    }
-
     /// Loads and atomically publishes the complete snapshot.
     ///
     /// A cached load returns established memory immediately unless configured
@@ -479,38 +458,6 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         try Task.checkCancellation()
         supersedeMutations()
         try await enqueue(.reset)
-    }
-
-    /// Schedules a reset without waiting for persistence to finish.
-    ///
-    /// This compatibility overload is deprecated because it cannot report a
-    /// persistence failure. Use ``reset()`` with `try await` to observe
-    /// completion and errors.
-    @available(
-        *,
-        deprecated,
-        message: "Use try await reset() to observe completion and errors."
-    )
-    public func reset() {
-        Task { @MainActor [weak self] in
-            try? await self?.reset()
-        }
-    }
-
-    /// Resets observable memory and writable local snapshots.
-    ///
-    /// This compatibility overload is deprecated; ``reset()`` now always
-    /// removes writable local snapshots.
-    ///
-    /// - Parameter scope: Ignored. It is retained for source compatibility.
-    /// - Throws: An error raised by a writable ``LocalSource``.
-    @available(
-        *,
-        deprecated,
-        message: "Use reset(); it always clears writable local snapshots."
-    )
-    public func reset(including _: ResetScope) async throws {
-        try await reset()
     }
 }
 
@@ -1699,9 +1646,11 @@ extension BucketPartition: AsyncSequence {
 
     /// Observes outcomes without starting a load.
     ///
-    /// Initial unavailability is silent. Each iterator has an independent,
-    /// unbounded buffer and retains the partition until cancelled or released.
-    /// Changes may coalesce; iteration observes current outcomes rather than a mutation log.
+    /// Each iterator receives the current result if one exists. Initial
+    /// unavailability is silent. A reset clears a previous result while the
+    /// partition remains unavailable. Changes may coalesce. Each iterator has
+    /// an independent, unbounded buffer and retains its partition until cancelled
+    /// or released.
     nonisolated public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(observation: makeSourceObservation(self))
     }

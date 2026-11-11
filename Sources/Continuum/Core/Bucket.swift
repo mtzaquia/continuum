@@ -80,23 +80,6 @@ public final class Bucket<
         partitionConfiguration = nil
     }
 
-    /// Creates an observable data bucket with unlimited cache reuse.
-    ///
-    /// A bucket accepts any number of local sources and invalidation signals
-    /// and at most one remote source. Cached loads return established memory
-    /// indefinitely. Use the `staleAfter:` initializer to require periodic
-    /// remote validation.
-    ///
-    /// - Parameters:
-    ///   - keySpace: The key whose atomic snapshot this bucket owns.
-    ///   - configuration: The sources attached to this bucket.
-    public convenience init(
-        _ keySpace: Space,
-        @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space>
-    ) where Scope == UnpartitionedBucketScope {
-        self.init(keySpace, staleAfter: nil, configuration: configuration)
-    }
-
     /// Creates an observable data bucket with configurable snapshot freshness.
     ///
     /// The builder is typed by `keySpace`, so sources infer the complete
@@ -120,7 +103,7 @@ public final class Bucket<
     ///   - configuration: The sources attached to this bucket.
     public init(
         _ keySpace: Space,
-        staleAfter: Duration?,
+        staleAfter: Duration? = nil,
         @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space>
     ) where Scope == UnpartitionedBucketScope {
         self.keySpace = keySpace
@@ -131,31 +114,6 @@ public final class Bucket<
             configuration: configuration()
         )
         partitionConfiguration = nil
-    }
-
-    /// Creates a bucket containing independent partitions with unlimited cache reuse.
-    ///
-    /// Equal partition identities reuse their snapshot and source work.
-    /// Cached loads return established memory indefinitely. Use the
-    /// `staleAfter:` initializer to require periodic remote validation.
-    ///
-    /// - Parameters:
-    ///   - keySpace: The key shape shared by every partition.
-    ///   - partition: The stable type identifying independent snapshots.
-    ///   - configuration: The sources for one selected partition.
-    public convenience init<Partition>(
-        _ keySpace: Space,
-        partitionedBy partition: Partition.Type,
-        @BucketBuilder<Space> configuration:
-            @escaping @MainActor @Sendable (Partition) ->
-                BucketConfiguration<Space>
-    ) where Scope == PartitionedScope<Partition> {
-        self.init(
-            keySpace,
-            partitionedBy: partition,
-            staleAfter: nil,
-            configuration: configuration
-        )
     }
 
     /// Creates independently loaded partitions with configurable snapshot freshness.
@@ -180,7 +138,7 @@ public final class Bucket<
     public init<Partition>(
         _ keySpace: Space,
         partitionedBy _: Partition.Type,
-        staleAfter: Duration?,
+        staleAfter: Duration? = nil,
         @BucketBuilder<Space> configuration:
             @escaping @MainActor @Sendable (Partition) ->
                 BucketConfiguration<Space>
@@ -276,20 +234,7 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     /// An established snapshot remains a success when an operation fails. Read
     /// ``error`` for the operation failure. A collection load can publish a
     /// failure when no snapshot is available.
-    var latest: Update<Space.Snapshot> { storage.latestUpdate }
-
-    internal var latestUpdate: Update<Space.Snapshot> {
-        storage.latestUpdate
-    }
-
-    /// Creates a sequence of snapshot results and reset transitions.
-    ///
-    /// Creating the sequence does not start a load. See
-    /// ``BucketPartition/makeAsyncIterator()`` for its delivery semantics.
-    @available(*, deprecated, message: "Iterate the bucket or selected partition directly instead of calling updates().")
-    func updates() -> AsyncStream<Update<Space.Snapshot>> {
-        makeSourceObservation(self).stream
-    }
+    var latest: Update<Space.Snapshot> { storage.latest }
 
     /// Loads and atomically publishes the complete snapshot.
     ///
@@ -368,38 +313,6 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     ///
     /// - Throws: An error raised by a writable ``LocalSource``.
     func reset() async throws {
-        try await storage.reset()
-    }
-
-    /// Schedules a reset without waiting for persistence to finish.
-    ///
-    /// This compatibility overload is deprecated because it cannot report a
-    /// persistence failure. Use ``reset()`` with `try await` to observe
-    /// completion and errors.
-    @available(
-        *,
-        deprecated,
-        message: "Use try await reset() to observe completion and errors."
-    )
-    func reset() {
-        Task { @MainActor in
-            try? await storage.reset()
-        }
-    }
-
-    /// Resets observable memory and writable local snapshots.
-    ///
-    /// This compatibility overload is deprecated; ``reset()`` now always
-    /// removes writable local snapshots.
-    ///
-    /// - Parameter scope: Ignored. It is retained for source compatibility.
-    /// - Throws: An error raised by a writable ``LocalSource``.
-    @available(
-        *,
-        deprecated,
-        message: "Use reset(); it always clears writable local snapshots."
-    )
-    func reset(including _: ResetScope) async throws {
         try await storage.reset()
     }
 }
