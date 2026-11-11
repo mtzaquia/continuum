@@ -29,6 +29,7 @@
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
     let load: (@MainActor @Sendable (LoadPolicy) async -> Void)?
+    let activate: InputActivation?
     private var materialize: (@MainActor () -> Input<Value>)? = nil
 
     /// Observes a bucket, selected partition, or composition without loading it.
@@ -103,8 +104,10 @@ public struct Input<Value: Sendable> {
 
     /// Bridges a sequence of results into the composition's required inputs.
     ///
-    /// The factory is invoked once per composition and again on loads configured
-    /// with `.restart`. Before the first element this input is unavailable.
+    /// The factory is invoked once per composition on first use, and again on
+    /// subsequent loads configured with `.restart`. Reading `latest` or `error`,
+    /// iterating, or loading starts sequence inputs, including nested ones.
+    /// Before the first element this input is unavailable.
     /// Failures are outcomes; normal completion retains the last outcome. An
     /// iteration error becomes a failure and ends that subscription. Use
     /// ``optional()`` to turn unavailable and failed outcomes into nil.
@@ -125,9 +128,8 @@ public struct Input<Value: Sendable> {
     ) where Source.Element == Result<Value, Failure> {
         self.init(read: { .init(value: nil, unavailable: true, failures: []) }, materialize: {
             let state = SequenceInputState<Value>(updates)
-            state.subscribe()
             let loader = CompositionLoad { policy in
-                if case .restart = subscriptionOnLoad { state.subscribe() }
+                state.subscribeForLoad(subscriptionOnLoad)
                 try await state.waitUntilSubscribed()
                 try await load?(policy)
             }
@@ -149,7 +151,9 @@ public struct Input<Value: Sendable> {
                 case nil:
                     return .init(value: nil, unavailable: true, failures: [])
                 }
-            }, load: action)
+            }, load: action, activate: { forLoad in
+                state.activate(forLoad: forLoad && subscriptionOnLoad == .restart)
+            })
         })
     }
 
@@ -157,12 +161,16 @@ public struct Input<Value: Sendable> {
         _ source: Source, loader: CompositionLoad?
     ) where Source.Snapshot == Value {
         let resetSource = source as? any CompositionResetSource
+        let nested = source as? any CompositionInputSource<Value>
         self.init(
-            readUpdate: { source.latest },
+            readUpdate: {
+                if let nested { return nested.currentUpdate }
+                return source.latest
+            },
             resetRevision: { resetSource?.compositionResetRevision ?? 0 },
             loader: loader,
             bucket: source as? any BucketSnapshotSource,
-            nested: source as? any CompositionErrorSource
+            nested: nested
         )
     }
 
@@ -171,7 +179,7 @@ public struct Input<Value: Sendable> {
         resetRevision: @escaping @MainActor () -> UInt = { 0 },
         loader: CompositionLoad? = nil,
         bucket: (any BucketSnapshotSource)? = nil,
-        nested: (any CompositionErrorSource)? = nil
+        nested: (any CompositionInputSource<Value>)? = nil
     ) {
         read = {
             let update = readUpdate()
@@ -197,6 +205,11 @@ public struct Input<Value: Sendable> {
                              failures: failures, resetRevision: revision, reportedFailures: reportErrors)
             }
         }
+        if let nested {
+            activate = { forLoad in nested.activate(forLoad: forLoad) }
+        } else {
+            activate = nil
+        }
         if let loader {
             load = { policy in await loader.run(policy) }
         } else {
@@ -207,10 +220,12 @@ public struct Input<Value: Sendable> {
     init(
         read: @escaping @MainActor () -> CompositionInputState<Value>,
         load: (@MainActor @Sendable (LoadPolicy) async -> Void)? = nil,
+        activate: InputActivation? = nil,
         materialize: (@MainActor () -> Input<Value>)? = nil
     ) {
         self.read = read
         self.load = load
+        self.activate = activate
         self.materialize = materialize
     }
 
@@ -232,7 +247,7 @@ public struct Input<Value: Sendable> {
                          unavailable: false, failures: [], reportedFailures: {
                              state.reportedFailures?() ?? (state.failures.isEmpty ? nil : state.failures)
                          })
-        }, load: load, materialize: factory)
+        }, load: load, activate: activate, materialize: factory)
     }
 
     /// Relaxes an already-optional input without adding another optional layer.
@@ -250,7 +265,7 @@ public struct Input<Value: Sendable> {
             return .init(value: .some(value), unavailable: false, failures: [], reportedFailures: {
                 state.reportedFailures?() ?? (state.failures.isEmpty ? nil : state.failures)
             })
-        }, load: load, materialize: factory)
+        }, load: load, activate: activate, materialize: factory)
     }
 }
 

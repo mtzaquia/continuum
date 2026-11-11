@@ -19,6 +19,8 @@
 - `Input(update:load:)` bridges observable repository state that reports its
   own availability and failures. Observed resets propagate through nested
   compositions.
+- `Input(updates:)` starts its sequence subscription on first use of the
+  composition. A first use that loads with `.restart` creates one subscription.
 
 This changes observable behavior even though existing `Update` switches still
 compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).

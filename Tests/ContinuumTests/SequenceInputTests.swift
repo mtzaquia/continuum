@@ -3,6 +3,94 @@ import Testing
 
 @Suite("Sequence inputs", .timeLimit(.minutes(1)))
 struct SequenceInputTests {
+    @Test("Constructing nested compositions leaves sequence factories dormant")
+    func nestedStartup() async {
+        var factories = 0
+        let inner = Composition {
+            Input(updates: {
+                factories += 1
+                return AsyncStream<Result<Int, StreamError>> { $0.yield(.success(2)); $0.finish() }
+            })
+        } transform: { $0 + 1 }
+        let outer = Composition { Input(inner) } transform: { $0 * 2 }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!outer.isLoading)
+        #expect(factories == 0)
+
+        var updates = outer.makeAsyncIterator()
+        #expect(value(await updates.next()) == 6)
+        #expect(factories == 1)
+    }
+
+    @Test("Reading either observable outcome starts a shared subscription", arguments: [false, true])
+    func observableStartup(readError: Bool) async {
+        var factories = 0
+        let (started, notify) = AsyncStream<Void>.makeStream()
+        let composition = Composition {
+            Input(updates: {
+                factories += 1
+                notify.yield(())
+                return AsyncStream<Result<Int, StreamError>> { $0.yield(.success(2)); $0.finish() }
+            })
+        } transform: { $0 + 1 }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(factories == 0)
+
+        if readError { #expect(composition.error == nil) }
+        else { #expect(isReset(composition.latest)) }
+        var starts = started.makeAsyncIterator()
+        _ = await starts.next()
+        var updates = composition.makeAsyncIterator()
+        #expect(value(await updates.next()) == 3)
+        #expect(factories == 1)
+    }
+
+    @Test("A first explicit nested load creates one restart subscription before the action")
+    func firstLoad() async {
+        var factories = 0
+        var loads = 0
+        let inner = Composition {
+            Input(updates: {
+                factories += 1
+                return AsyncStream<Result<Int, StreamError>> { $0.finish() }
+            }, subscriptionOnLoad: .restart, load: { _ in
+                #expect(factories == 1)
+                loads += 1
+            })
+        } transform: { $0 }
+        let outer = Composition {
+            Input(inner) { policy in await inner.load(using: policy) }
+        } transform: { $0 }
+
+        await outer.load()
+        #expect(factories == 1)
+        #expect(loads == 1)
+    }
+
+    @Test("A nested sequence starts before a custom parent load and restarts on a later direct load")
+    func customParentLoad() async {
+        var factories = 0
+        let (started, notify) = AsyncStream<Void>.makeStream()
+        let inner = Composition {
+            Input(updates: {
+                factories += 1
+                notify.yield(())
+                return AsyncStream<Result<Int, StreamError>> { $0.finish() }
+            }, subscriptionOnLoad: .restart)
+        } transform: { $0 }
+        let outer = Composition {
+            Input(inner) { _ in
+                var starts = started.makeAsyncIterator()
+                _ = await starts.next()
+            }
+        } transform: { $0 }
+
+        await outer.load()
+        #expect(factories == 1)
+        await inner.load()
+        #expect(factories == 2)
+    }
+
     @Test("Result streams gate required inputs and recover without reset")
     func outcomes() async {
         let (stream, producer) = AsyncStream<Result<Int, StreamError>>.makeStream()
@@ -53,6 +141,7 @@ struct SequenceInputTests {
                 factories += 1
                 let (stream, producer) = AsyncStream<Result<Int, StreamError>>.makeStream()
                 producers.append(producer)
+                if factories == 1 { producer.yield(.success(1)) }
                 return stream
             }, subscriptionOnLoad: .restart, load: { policy in
                 #expect(factories == 2)
@@ -60,9 +149,7 @@ struct SequenceInputTests {
                 producers.last?.yield(.success(9))
             })
         } transform: { $0 + 1 }
-        for _ in 0..<10 { await Task.yield() }
         var iterator = composition.makeAsyncIterator()
-        producers[0].yield(.success(1))
         #expect(value(await iterator.next()) == 2)
         await composition.load(using: .remote)
         #expect(loads == 1)

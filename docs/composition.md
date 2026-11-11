@@ -262,15 +262,17 @@ let displayUser = Composition {
 }
 ```
 
-The factory returns a `Sendable` async sequence of `Result<Value, Failure>`;
-standard `AsyncStream` and `AsyncThrowingStream` work. It runs on the main actor
-once per composition at construction, then iteration runs in its own task.
-The iterator itself need not be sendable.
+The factory returns a `Sendable` async sequence of `Result<Value, Failure>`.
+Standard `AsyncStream` and `AsyncThrowingStream` work. The first read of
+`latest` or `error`, first iterator, or explicit load starts the subscription,
+including for nested compositions. The factory runs on the main actor, then
+iteration runs in its own task. The iterator itself need not be sendable.
 
-`subscriptionOnLoad` defaults to `.keep`, including after completion. `.restart`
-cancels the old subscription and creates a new iterator before loading. It can
-omit the action if subscribing itself starts work. Iterator creation does not
-guarantee that a hot upstream stream is ready to receive events.
+`subscriptionOnLoad` defaults to `.keep`, including after completion. With
+`.restart`, a load that first uses the composition creates one subscription.
+Later loads replace the subscription and create the new iterator before the
+action runs. Omit the action if subscribing itself starts work. Iterator
+creation does not guarantee that a hot upstream stream is ready for events.
 
 Before the first result, required inputs wait and optional inputs supply nil.
 Result failures recover on later successes. A thrown iteration error becomes a

@@ -19,7 +19,7 @@ its outer bucket when another owner retains it.
 | --- | --- |
 | Bucket or partition iterator | Owns an independent observation and retains its source until cancelled or released. |
 | Composition iterator | Retains the composition and subscribes to its shared outcome. Ending one iterator does not stop others. |
-| Sequence input | One subscription per composition; cancelled when the composition is released or the subscription restarts. |
+| Sequence input | One subscription per composition, started on first use. Releasing the composition or restarting the subscription cancels it. |
 | Relationship input | Retains lookup values and observes partitions while their keys are required. Releasing the composition cancels dependent tasks. |
 
 Reusing a declaration creates independent composition state. A sequence factory

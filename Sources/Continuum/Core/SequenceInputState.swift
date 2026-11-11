@@ -24,7 +24,7 @@ import Observation
 
 /// Controls whether a sequence input replaces its subscription when loaded.
 public enum InputSubscriptionBehavior: Sendable, Equatable {
-    /// Keeps the current subscription, even if it has completed.
+    /// Starts the subscription if needed and keeps it after completion.
     case keep
     /// Cancels the old subscription and creates a new iterator before loading.
     case restart
@@ -36,6 +36,7 @@ final class SequenceInputState<Value: Sendable> {
     var result: Result<Value, any Error>?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var ready: Task<Void, Never>?
+    @ObservationIgnored private var awaitingFirstLoad = false
     @ObservationIgnored private let start: @MainActor (
         SequenceInputState<Value>, AsyncStream<Void>.Continuation
     ) -> Task<Void, Never>
@@ -67,7 +68,20 @@ final class SequenceInputState<Value: Sendable> {
         self.result = result
     }
 
-    func subscribe() {
+    func activate(forLoad: Bool) -> (@MainActor () -> Void)? {
+        guard task == nil else { return nil }
+        awaitingFirstLoad = forLoad
+        subscribe()
+        guard forLoad else { return nil }
+        return { self.awaitingFirstLoad = false }
+    }
+
+    func subscribeForLoad(_ behavior: InputSubscriptionBehavior) {
+        if task == nil || (behavior == .restart && !awaitingFirstLoad) { subscribe() }
+        awaitingFirstLoad = false
+    }
+
+    private func subscribe() {
         task?.cancel()
         let (stream, continuation) = AsyncStream<Void>.makeStream()
         // A shared readiness task prevents one cancelled load from terminating

@@ -38,6 +38,13 @@ optional input errors and any error thrown by the transform. Its return value
 sets `composition.error` and is shared by `latest` whenever the outcome fails.
 [Error mapping →](composition.md#observe-composition-errors)
 
+## Start sequence inputs on first use
+
+`Input(updates:)` starts its subscription when the composition is first read
+through `latest` or `error`, iterated, or loaded. If you relied on construction
+to start a subscription, read `latest` at that point. Calling `load()` also
+runs configured loading actions. [Sequence inputs →](composition.md#bridge-result-sequences)
+
 ## Update Ensemble error presentation
 
 Keep forwarding `.result` to the sink and `.reset` to `sink.reset()`. A failed
