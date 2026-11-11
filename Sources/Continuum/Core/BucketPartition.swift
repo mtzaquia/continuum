@@ -284,11 +284,11 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         loadState.isLoaded
     }
 
-    /// The latest snapshot-loading, mutation, persistence, or invalidation error.
+    /// The latest collection load, entry load, mutation, persistence, or invalidation error.
     ///
     /// Starting source work or a mutation clears the previous error. A cached
-    /// memory hit preserves it. A reset clears it on success. Continuation failures appear in
-    /// ``nextPageError`` instead.
+    /// memory hit preserves it. A reset clears it on success. Continuation
+    /// failures appear in ``nextPageError``.
     public var error: (any Error)? {
         loadState.error
     }
@@ -346,13 +346,15 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
 
     /// The current observable result or reset, initially `.reset`.
     ///
-    /// Loading alone does not clear the outcome. Failures are represented in
-    /// the result; this property does not retain a separate successful value.
+    /// An established snapshot remains a success when an operation fails. Read
+    /// ``error`` for the operation failure. A collection load can publish a
+    /// failure when no snapshot is available.
     public var latest: Update<Space.Snapshot> { latestUpdate }
 
     /// Creates a sequence of snapshot results and reset transitions.
     ///
-    /// The sequence immediately emits an established snapshot or current error.
+    /// The sequence immediately emits an established snapshot or a collection
+    /// load failure when no snapshot is available.
     /// An untouched or loading bucket without a snapshot remains silent, while
     /// an established empty snapshot emits a successful empty value. After a
     /// result, reset emits ``Update/reset`` only while the bucket remains
@@ -591,19 +593,24 @@ private extension BucketPartition {
         }
     }
 
-    private func publishStreamState(changes: () -> Void) {
+    private func publishStreamState(
+        whenUnavailable: Update<Space.Snapshot> = .reset,
+        changes: () -> Void
+    ) {
         changes()
         let previous = latestUpdate
-        latestUpdate = if let error = loadState.error {
-            .result(.failure(error))
-        } else if loadState.isLoaded, let snapshot {
+        latestUpdate = if let snapshot {
             .result(.success(snapshot))
         } else {
-            .reset
+            whenUnavailable
         }
         if case .reset = latestUpdate, case .result = previous {
             compositionResetRevision &+= 1
         }
+    }
+
+    private func setOperationError(_ error: (any Error)?) {
+        loadState = LoadState(isLoading: loadState.isLoading, isLoaded: loadState.isLoaded, error: error)
     }
 
     var currentOperationID: String {
@@ -756,6 +763,7 @@ private extension BucketPartition {
         loadState = LoadState(isLoaded: loadState.isLoaded)
         let ownership = MutationOwnership(epoch: epoch, generation: generation)
         let previousSnapshot = snapshot
+        let previousUpdate = latestUpdate
         let previousRemoteLoad = lastRemoteLoad
         let previousPaginationCheckpoint = paginationCheckpoint
         let resetsPagination: Bool
@@ -833,6 +841,7 @@ private extension BucketPartition {
         } catch {
             await rollback(
                 to: previousSnapshot,
+                previousUpdate: previousUpdate,
                 after: error,
                 ownership: ownership,
                 lastRemoteLoad: previousRemoteLoad,
@@ -876,6 +885,7 @@ private extension BucketPartition {
 
     private func rollback(
         to snapshot: Space.Snapshot?,
+        previousUpdate: Update<Space.Snapshot>,
         after error: any Error,
         ownership: MutationOwnership,
         lastRemoteLoad: ContinuousClock.Instant?,
@@ -883,7 +893,7 @@ private extension BucketPartition {
     ) async {
         guard ownsState(ownership) else { return }
 
-        publishStreamState {
+        publishStreamState(whenUnavailable: previousUpdate) {
             self.lastRemoteLoad = lastRemoteLoad
             if let snapshot {
                 storedSnapshot = .present(snapshot)
@@ -927,12 +937,7 @@ private extension BucketPartition {
                     error: error
                 )
             )
-            publishStreamState {
-                loadState = LoadState(
-                    isLoaded: loadState.isLoaded,
-                    error: error
-                )
-            }
+            setOperationError(error)
         }
     }
 
@@ -1281,7 +1286,7 @@ private extension BucketPartition {
         )
 
         if inFlight == nil {
-            publishStreamState {
+            publishStreamState(whenUnavailable: .result(.failure(error))) {
                 loadState = LoadState(
                     isLoaded: loadState.isLoaded,
                     error: error
@@ -1303,7 +1308,7 @@ private extension BucketPartition {
         inFlight = flight
         completedFlight = nil
         let state = LoadState(isLoading: true, isLoaded: loadState.isLoaded)
-        if loadState.error != nil {
+        if case .result(.failure) = latestUpdate {
             publishStreamState { loadState = state }
         } else {
             // Loading bookkeeping alone must not duplicate a success update.
@@ -1402,7 +1407,7 @@ private extension BucketPartition {
         }
 
         let operationID = inFlight?.operationID
-        publishStreamState {
+        publishStreamState(whenUnavailable: .result(.failure(error))) {
             inFlight = nil
             remoteContinuationGeneration = nil
             completedFlight = CompletedFlight(
@@ -1726,7 +1731,8 @@ public extension BucketPartition {
     /// `.cached` returns an existing entry; other policies fetch remotely. Fetches
     /// for the same ID share work except `.remote`, which replaces earlier work.
     /// Missing entries are returned without insertion
-    /// or persistence. Ordering, pagination, and whole-list loading state are preserved.
+    /// or persistence. Ordering, pagination, and the collection's availability are
+    /// preserved. Entry failures are reported through ``error`` and thrown to the caller.
     /// Resets and superseding collection operations cancel pending entry loads.
     ///
     /// - Parameters:
@@ -1752,25 +1758,33 @@ public extension BucketPartition {
                 if let flight = inFlight { _ = try await resolve(flight) }
                 try Task.checkCancellation()
                 if policy == .cached, let value = self[id] { return value }
-                guard let loader = remoteSource?.loadEntry else {
-                    throw ContinuumError.missingEntrySource(namespace: keySpace.namespace)
-                }
                 let generation = generation
-                let wasMember = self[id] != nil
-                let value = try await loader.operation(id)
-                try Task.checkCancellation()
-                guard self.generation == generation else { throw CancellationError() }
-                guard keySpace.input(for: value) == id else {
-                    throw ContinuumError.mismatchedEntryIdentity(namespace: keySpace.namespace)
-                }
-                if wasMember {
-                    try await enqueue(kind: .loadEntry) { [self] epoch in
-                        try await replaceEntry(value, ownership: .init(epoch: epoch, generation: generation))
+                if loadState.error != nil { setOperationError(nil) }
+                do {
+                    guard let loader = remoteSource?.loadEntry else {
+                        throw ContinuumError.missingEntrySource(namespace: keySpace.namespace)
                     }
+                    let wasMember = self[id] != nil
+                    let value = try await loader.operation(id)
+                    try Task.checkCancellation()
+                    guard self.generation == generation else { throw CancellationError() }
+                    guard keySpace.input(for: value) == id else {
+                        throw ContinuumError.mismatchedEntryIdentity(namespace: keySpace.namespace)
+                    }
+                    if wasMember {
+                        try await enqueue(kind: .loadEntry) { [self] epoch in
+                            try await replaceEntry(value, ownership: .init(epoch: epoch, generation: generation))
+                        }
+                    }
+                    try Task.checkCancellation()
+                    guard self.generation == generation else { throw CancellationError() }
+                    return value
+                } catch {
+                    if self.generation == generation, !Task.isCancelled, !(error is CancellationError) {
+                        setOperationError(error)
+                    }
+                    throw error
                 }
-                try Task.checkCancellation()
-                guard self.generation == generation else { throw CancellationError() }
-                return value
             }
             entryTasks[id] = task
         }

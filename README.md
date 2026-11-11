@@ -27,6 +27,9 @@ Version 1.1.0 includes compositions, direct iteration, and snapshot freshness.
 When upgrading from 1.0.x, review the [migration notes](https://github.com/mtzaquia/continuum/releases/tag/v1.1.0)
 for observation-protocol and sendable key-path changes.
 
+For changes on `main` since that release, see the [unreleased notes](CHANGELOG.md)
+and [2.0.0 migration guide](docs/migrating-to-2.md).
+
 ## Five-minute start
 
 Use `Key<Value>` for a single value or `IndexedKey<ID, Value>` for an ordered
@@ -67,6 +70,29 @@ remote. Use `.cachedThenRemote` to show cache while refreshing, or `.remote`
 to supersede work and fetch fresh data. Add `staleAfter: .seconds(300)` to a
 bucket initializer to have cached snapshot loads refresh stale data while
 keeping existing values readable. [Choose a loading policy →](docs/loading.md)
+
+An established snapshot stays available as a successful `latest` after a failed
+refresh or rollback. Observe `error` or `state.error` for the operation failure.
+A `.cached` memory hit returns the retained value and preserves the error.
+
+### Declare repository properties
+
+Use the upcoming release's bucket aliases in repository properties and
+protocol requirements.
+
+```swift
+@MainActor
+protocol PostRepository {
+  var posts: IdentifiedBucket<Post> { get }
+  var featured: ValueBucket<Post> { get }
+  var postsByTopic: PartitionedIdentifiedBucket<String, Post> { get }
+  var topicNames: PartitionedValueBucket<String, [String]> { get }
+}
+```
+
+`IdentifiedBucket` and `PartitionedIdentifiedBucket` infer the index type from
+the model's `Identifiable.ID`. For a custom index, use `IndexedBucket<Index, Value>`
+or `PartitionedIndexedBucket<Partition, Index, Value>` with an `indexedBy:` key.
 
 ## Observe and combine
 

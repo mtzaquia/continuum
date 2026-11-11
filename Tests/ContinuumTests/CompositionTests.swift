@@ -206,6 +206,39 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 6)
     }
 
+    @Test("A failed partition refresh keeps a required input available to current and late subscribers")
+    func retainedPartitionAfterCompositionLoad() async throws {
+        let bucket = Bucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in
+            RemoteSource { throw TestError.failed }
+        }
+        let partition = bucket["selected"]
+        let sibling = Bucket(Key<Int>("composition.sibling"))
+        try await partition.store(10)
+        try await sibling.store(1)
+        let composition = Composition {
+            Input(partition) { policy in try await partition.load(using: policy) }
+            Input(sibling)
+        } transform: { $0 + $1 }
+        var current = composition.makeAsyncIterator()
+        #expect(success(await current.next()) == 11)
+
+        await composition.load(using: .remote)
+        #expect(partition.error is TestError)
+        #expect(success(composition.latest) == 11)
+        #expect(success(try await firstUpdate(composition)) == 11)
+
+        try await sibling.store(2)
+        // Pending recomputations can repeat the retained success.
+        while let update = await current.next() {
+            guard let value = success(update) else {
+                Issue.record("Expected the retained snapshot to stay available")
+                break
+            }
+            if value == 12 { break }
+        }
+        #expect(success(composition.latest) == 12)
+    }
+
     @Test("Overlapping loads retain loading state and ignore obsolete action errors")
     func overlappingLoads() async {
         let (started, start) = AsyncStream<Void>.makeStream()
@@ -470,20 +503,25 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 2)
     }
 
-    @Test("Bucket errors and recovery agree between latest and direct iteration")
+    @Test("A failed refresh replays the retained snapshot and a cached hit preserves the error")
     func directBucketFailure() async throws {
         let bucket = Bucket(Key<Int>("uniform.failure")) {
             RemoteSource { throw TestError.failed }
         }
         try await bucket.store(1)
         var iterator = bucket.makeAsyncIterator()
-        _ = await iterator.next()
-        do { try await bucket.load(using: .remote) } catch {}
-        #expect(isFailure(await iterator.next()))
-        #expect(isFailure(bucket.latest))
+        #expect(success(await iterator.next()) == 1)
+        await #expect(throws: TestError.self) { try await bucket.load(using: .remote) }
+        #expect(success(await iterator.next()) == 1)
+        #expect(success(bucket.latest) == 1)
+        #expect(bucket.state.error is TestError)
+        #expect(try await bucket.load(using: .cached) == 1)
+        #expect(bucket.error is TestError)
+        #expect(success(try await firstUpdate(bucket)) == 1)
         try await bucket.store(2)
         #expect(success(await iterator.next()) == 2)
         #expect(success(bucket.latest) == 2)
+        #expect(bucket.error == nil)
     }
 
     @Test("Direct bucket subscribers cancel independently")
@@ -509,7 +547,7 @@ struct CompositionTests {
 
     @Test("Releasing a direct iterator releases its retained bucket")
     func directIteratorLifetime() async throws {
-        var bucket: DataBucket<Int>? = Bucket(Key<Int>("uniform.lifetime"))
+        var bucket: ValueBucket<Int>? = Bucket(Key<Int>("uniform.lifetime"))
         try await bucket?.store(1)
         weak var weakBucket = bucket
         var iterator = bucket?.makeAsyncIterator()

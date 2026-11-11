@@ -714,6 +714,22 @@ struct BucketTests {
         #expect(labels.values == [existing])
         #expect(labels.isLoaded)
         #expect(labels.error is TestError)
+        if case .result(.success(let snapshot)) = labels.latest {
+            #expect(snapshot == [existing])
+        } else { Issue.record("Expected the snapshot restored by rollback") }
+    }
+
+    @Test("A failed first store rolls back to unavailable and exposes its error separately")
+    func failedFirstStore() async {
+        let count = Bucket(TestData.count) {
+            LocalSource { nil } persist: { snapshot in
+                if snapshot != nil { throw TestError.failed }
+            }
+        }
+        await #expect(throws: TestError.self) { try await count.store(1) }
+        #expect(count.value == nil)
+        #expect(count.error is TestError)
+        if case .reset = count.latest {} else { Issue.record("Expected the original unavailable outcome") }
     }
 
     @Test("A failed remote remove rolls back local and memory state")
@@ -925,6 +941,24 @@ struct BucketTests {
         #expect(labels.isLoaded == false)
         #expect(labels.isEmpty)
         #expect(labels.error is TestError)
+        if case .result(.failure(let error)) = labels.latest {
+            #expect(error is TestError)
+        } else { Issue.record("Expected failure before any snapshot is established") }
+    }
+
+    @Test("A remote persistence failure retains an established empty snapshot")
+    func remotePersistenceFailureWithSnapshot() async throws {
+        let labels = Bucket(TestData.labels) {
+            LocalSource { [Label]() } persist: { _ in throw TestError.failed }
+            RemoteSource { [Label(id: 1, text: "remote")] }
+        }
+        #expect(try await labels.load().isEmpty)
+        await #expect(throws: TestError.self) { try await labels.load(using: .remote) }
+        #expect(labels.isLoaded)
+        #expect(labels.error is TestError)
+        if case .result(.success(let snapshot)) = labels.latest {
+            #expect(snapshot.isEmpty)
+        } else { Issue.record("Expected the empty local snapshot") }
     }
 
     @Test("Indexed values preserve insertion order")
@@ -1874,11 +1908,11 @@ struct BucketTests {
         #expect(labels.values == [existing])
         #expect(labels.isLoaded)
         #expect(labels.error is TestError)
-        guard case .result(.failure(let error))? = await updates.next() else {
-            Issue.record("Expected the reset failure")
+        guard case .result(.success(let snapshot))? = await updates.next() else {
+            Issue.record("Expected the snapshot restored after the failed reset")
             return
         }
-        #expect(error is TestError)
+        #expect(snapshot == [existing])
     }
 
     @Test("An invalidation signal resets local and in-memory state")
@@ -1946,6 +1980,21 @@ struct BucketTests {
 
         #expect(labels.isEmpty)
         #expect(labels.error == nil)
+    }
+
+    @Test("Invalidation stream errors leave snapshot availability unchanged", arguments: [false, true])
+    func invalidationStreamError(loaded: Bool) async throws {
+        let (events, continuation) = AsyncThrowingStream<Void, any Error>.makeStream()
+        let count = Bucket(TestData.count) { InvalidationSignal { events } }
+        if loaded { try await count.store(1) }
+        continuation.finish(throwing: TestError.failed)
+        while count.error == nil { await Task.yield() }
+
+        #expect(count.error is TestError)
+        switch (loaded, count.latest) {
+        case (true, .result(.success(1))), (false, .reset): break
+        default: Issue.record("Expected the prior availability after the invalidation stream failed")
+        }
     }
 
     @Test("NotificationCenter can provide invalidation events")

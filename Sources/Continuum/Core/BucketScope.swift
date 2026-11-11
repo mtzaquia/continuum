@@ -54,3 +54,22 @@ public typealias PartitionedBucket<
     Partition: Hashable & Sendable,
     Space: ContinuumKeySpace
 > = Bucket<Space, PartitionedScope<Partition>>
+
+/// An unpartitioned bucket whose snapshot is one value.
+public typealias ValueBucket<Value: Sendable> = Bucket<Key<Value>, UnpartitionedBucketScope>
+
+/// A bucket whose partitions each own one value.
+public typealias PartitionedValueBucket<
+    Partition: Hashable & Sendable,
+    Value: Sendable
+> = PartitionedBucket<Partition, Key<Value>>
+
+/// An unpartitioned collection bucket whose index type is `Value.ID`.
+public typealias IdentifiedBucket<Value: Identifiable & Sendable> =
+    IndexedBucket<Value.ID, Value> where Value.ID: Hashable & Sendable
+
+/// A bucket whose partitions each own a collection with index type `Value.ID`.
+public typealias PartitionedIdentifiedBucket<
+    Partition: Hashable & Sendable,
+    Value: Identifiable & Sendable
+> = PartitionedIndexedBucket<Partition, Value.ID, Value> where Value.ID: Hashable & Sendable

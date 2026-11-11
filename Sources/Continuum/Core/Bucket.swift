@@ -220,11 +220,11 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         storage.isLoaded
     }
 
-    /// The latest snapshot-loading, mutation, persistence, or invalidation error.
+    /// The latest collection load, entry load, mutation, persistence, or invalidation error.
     ///
     /// Starting source work or a mutation clears the previous error. A cached
-    /// memory hit preserves it. A reset clears it on success. Continuation failures appear in
-    /// ``nextPageError`` instead.
+    /// memory hit preserves it. A reset clears it on success. Continuation
+    /// failures appear in ``nextPageError``.
     var error: (any Error)? {
         storage.error
     }
@@ -273,8 +273,9 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
 
     /// The current observable result or reset, initially `.reset`.
     ///
-    /// Loading alone does not clear the outcome. Failures are represented in
-    /// the result; this property does not retain a separate successful value.
+    /// An established snapshot remains a success when an operation fails. Read
+    /// ``error`` for the operation failure. A collection load can publish a
+    /// failure when no snapshot is available.
     var latest: Update<Space.Snapshot> { storage.latestUpdate }
 
     internal var latestUpdate: Update<Space.Snapshot> {

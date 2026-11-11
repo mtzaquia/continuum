@@ -34,6 +34,20 @@ struct LoadEntryTests {
         #expect(await service.writes.isEmpty)
     }
 
+    @Test("A failed entry lookup without a list reports an error and leaves the list unavailable")
+    func failedLookupWithoutList() async throws {
+        let service = Service()
+        let bucket = makeBucket(service)
+        await service.failFetch(true)
+        await #expect(throws: Failure.self) { try await bucket.load(id: 1) }
+        #expect(bucket.error is Failure)
+        #expect(isReset(bucket.latest))
+        await service.failFetch(false)
+        #expect(try await bucket.load(id: 1) == Entry(1, "new"))
+        #expect(bucket.error == nil)
+        #expect(isReset(bucket.latest))
+    }
+
     @Test("Missing loaders and incorrect identities throw without changing the collection")
     func invalidConfigurationAndIdentity() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("entries")) {
@@ -51,7 +65,8 @@ struct LoadEntryTests {
         try await invalid.load()
         await #expect(throws: ContinuumError.self) { try await invalid.load(id: 1, using: .remote) }
         #expect(invalid.values == [Entry(1, "old")])
-        #expect(invalid.error == nil)
+        #expect(invalid.error is ContinuumError)
+        #expect(value(invalid.latest) == invalid.values)
     }
 
     @Test("Fetch and persistence errors preserve the list and its successful outcome")
@@ -62,13 +77,20 @@ struct LoadEntryTests {
         let old = bucket.values
         await service.failFetch(true)
         await #expect(throws: Failure.self) { try await bucket.load(id: 1, using: .remote) }
+        #expect(bucket.error is Failure)
+        #expect(value(bucket.latest) == old)
         await service.failFetch(false)
         await service.failWrite(true)
         await #expect(throws: Failure.self) { try await bucket.load(id: 1, using: .remote) }
         #expect(bucket.values == old)
-        #expect(bucket.error == nil)
+        #expect(bucket.state.error is Failure)
         #expect(value(bucket.latest) == old)
         #expect(await service.writes.last! == old)
+        #expect(try await bucket.load(id: 1) == Entry(1, "old"))
+        #expect(bucket.error is Failure)
+        await service.failWrite(false)
+        #expect(try await bucket.load(id: 1, using: .remote) == Entry(1, "new"))
+        #expect(bucket.error == nil)
     }
 
     @Test("Duplicate ID requests share work; different IDs reconcile without losing changes")
@@ -355,7 +377,7 @@ struct LoadEntryTests {
         await service.failFetch(true)
         await composition.load(using: .remote)
         if case .result(.failure) = composition.latest {} else { Issue.record("Expected relationship failure") }
-        #expect(bucket.error == nil)
+        #expect(bucket.error is Failure)
         await service.failFetch(false)
         await composition.load(using: .remote)
         #expect(value(composition.latest)?[1] == Entry(1, "new"))

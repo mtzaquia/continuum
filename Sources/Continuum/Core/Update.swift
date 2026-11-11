@@ -24,7 +24,7 @@ import Observation
 
 /// A coherent result or unavailable state published by a bucket or composition.
 nonisolated public enum Update<Snapshot: Sendable>: Sendable {
-    /// The bucket established a snapshot or reported an error.
+    /// An available snapshot or a failure of the source's current outcome.
     case result(Result<Snapshot, any Error>)
 
     /// The observed state is unavailable.
@@ -251,9 +251,12 @@ func makeBucketObservation<Output: Sendable>(
     })
 }
 
-extension Bucket: UpdateSource where Scope == UnpartitionedBucketScope {}
+// A bucket's outcome remains authoritative when its load action throws with data available.
+protocol BucketSnapshotSource: UpdateSource {}
 
-extension BucketPartition: UpdateSource, CompositionResetSource {}
+extension Bucket: UpdateSource, BucketSnapshotSource where Scope == UnpartitionedBucketScope {}
+
+extension BucketPartition: UpdateSource, BucketSnapshotSource, CompositionResetSource {}
 
 nonisolated private func successfulSnapshot<Snapshot: Sendable>(
     from update: Update<Snapshot>

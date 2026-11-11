@@ -40,15 +40,19 @@ public struct Input<Value: Sendable> {
     /// Observes a source and forwards composition load policies to an action.
     ///
     /// The action updates the observed source; its completion alone does not
-    /// establish a snapshot. Errors already reported by the source follow its
+    /// establish a snapshot. An available bucket snapshot takes precedence over
+    /// a thrown load error. Errors already published by the source follow its
     /// recovery. Other action errors remain until the next load of this input.
     public init<Source: UpdateSource>(
         _ source: Source,
         load: @escaping @MainActor (LoadPolicy) async throws -> Void
     ) where Source.Snapshot == Value {
-        self.init(source, loader: CompositionLoad(load, sourceReportsFailure: {
-            if case .result(.failure) = source.latest { return true }
-            return false
+        self.init(source, loader: CompositionLoad(load, sourceOwnsOutcome: {
+            switch source.latest {
+            case .result(.failure): true
+            case .result(.success): source is any BucketSnapshotSource
+            case .reset: false
+            }
         }))
     }
 

@@ -26,7 +26,7 @@ indexed favorites bucket supplies `[Favorite]`. No snapshot wrapper is exposed.
 | `Input(source)` | Observe a bucket, selected partition, or another composition. |
 | `Input(source) { policy in … }` | Also participate in explicit composition loads. |
 | `Input { expression }` | Track observable properties read by the closure. Add `load: { policy in … }` for loading. |
-| `.optional()` | Supply nil when unavailable or failed, including loading failures. |
+| `.optional()` | Supply nil when the input has no available outcome or its outcome is a failure. |
 
 Required inputs block the transform until available. Empty collections are
 available. An optional-valued bucket remains required unless `.optional()` is
@@ -50,10 +50,17 @@ concurrently, and `load` waits for all of them. A failed action does not cancel
 siblings. Actions must update their observed sources; returning does not itself
 establish a value or wait for a future sequence element.
 
-Composition loading returns `Void`; required errors appear in its outcome.
-Errors reported by a bucket follow that bucket's recovery. Other action errors
-clear on the next load. Caller cancellation propagates to actions without
-publishing a cancellation error.
+Composition loading returns `Void`. A bucket input with an established snapshot
+continues to supply its value after its load action throws. Sibling changes still
+reach the output, and new subscribers receive the composed value. Read the
+bucket's observable `error` or `state.error` to present the refresh failure.
+Composition leaves those errors with their owning buckets so nested inputs
+keep the same error and recovery source.
+
+A required bucket whose collection load fails without a snapshot fails the
+composition. Published input failures follow the source's recovery. Other
+loading action failures clear on the next load. Caller cancellation propagates
+to actions without publishing a cancellation error.
 
 Overlapping loads may run concurrently; the newest invocation owns each action's
 error state. A relationship declaration replaces its previous dependent work.
@@ -90,8 +97,10 @@ current result if present; initial and repeated unavailability stay silent.
 | Reset | Clear the previous outcome and wait | Supply nil |
 
 Failures do not end observation. A throwing transform also produces a failure.
-The default error is the first required failure in declaration order; use
-`mapFailures:` before `transform:` to combine them.
+The default error is the first required failure in declaration order. Use
+`mapFailures:` before `transform:` to combine them. A retained bucket snapshot
+is a success for required and optional inputs. Its operation error stays on
+the bucket and is outside `mapFailures:`.
 
 If a required reset accompanies a failure, the composition emits reset first
 so consumers can clear invalid retained data. Reset history from buckets and
@@ -135,8 +144,9 @@ Resolution uses [entry loading](loading.md#load-one-indexed-entry): existing
 entries stay observed; missing entries are fetched without changing the list.
 The composition retains the latest observed value while its key is needed,
 including after removal from the list. Resetting the bucket invalidates it.
-Entry failures affect the composition, not the list, and remain until a successful
-relationship load or reset. Collection edits alone do not clear load errors.
+Failed lookups still fail a required relationship until a successful relationship
+load or reset. The related bucket keeps its collection outcome and records the
+entry error separately. Collection edits alone do not clear relationship errors.
 
 `from:` also accepts an explicitly selected indexed partition. Partition keys
 select a collection (such as a search query); foreign keys select its entries.
@@ -241,36 +251,40 @@ optional layer. Loops and dynamically changing input counts are not supported.
 ## Bind to Ensemble
 
 [Ensemble](https://github.com/mtzaquia/ensemble) is a separate SwiftUI library
-for presentation state. Its `ViewData` can retain successful data while showing
-loading or failure; Continuum provides the data outcomes.
+for presentation state. An Ensemble 3 model can pass each Continuum outcome
+to `ViewData` and read refresh errors directly from the source bucket.
 
 ```swift
 import Ensemble
 
-let context = ViewDataContext()
-let viewData = ViewData<DisplayUser>()
+@MainActor
+final class DisplayUserModel {
+  let displayUser: Composition<DisplayUser>
 
-context.bind(
-  { displayUser },
-  to: viewData,
-  reload: .refresh {
-    Task { await displayUser.load(using: .remote) }
-  }
-) { update, sink in
-  switch update {
-  case .result(let result): sink.receive(result)
-  case .reset: sink.reset()
+  @ViewDataSource(
+    make: { (model: Self) in model.displayUser },
+    refresh: { model in await model.displayUser.load(using: .remote) },
+    receive: { _, update, sink in
+      switch update {
+      case .result(let result): sink.receive(result)
+      case .reset: sink.reset()
+      }
+    }
+  )
+  var viewData: ViewData<DisplayUser>
+
+  init(displayUser: Composition<DisplayUser>) {
+    self.displayUser = displayUser
   }
 }
-
-await displayUser.load()
 ```
 
-Add Ensemble separately and retain a `ViewDataContext`, a `ViewData<DisplayUser>`,
-and the composition in the feature owner. Initial silence preserves loading;
-a failure can retain data, while reset clears it without ending the binding.
-Retain and cancel the refresh task if it should stop with the feature. Loads
-started outside Ensemble do not automatically change its presentation phase.
+Retain the model for the life of the feature. `AsyncContent` connects the source
+when rendered. Call `viewData.connect()` if consuming it without `AsyncContent`.
+The binding starts empty, and reset clears the displayed value. A failed bucket
+refresh with retained data delivers success to `ViewData`. To show a refresh
+banner or log the failure, observe the input bucket's `error` separately.
+[Migration guide →](migrating-to-2.md)
 
 The [consumer fixture](../IntegrationTests/EnsembleConsumer/README.md) verifies
 bucket, nested-composition, and relationship bindings.

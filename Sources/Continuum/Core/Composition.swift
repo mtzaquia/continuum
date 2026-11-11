@@ -43,14 +43,14 @@ final class CompositionLoad {
     var error: (any Error)?
     @ObservationIgnored private var currentTask: Task<Void, any Error>?
     let action: @MainActor (LoadPolicy) async throws -> Void
-    let sourceReportsFailure: @MainActor () -> Bool
+    let sourceOwnsOutcome: @MainActor () -> Bool
 
     init(
         _ action: @escaping @MainActor (LoadPolicy) async throws -> Void,
-        sourceReportsFailure: @escaping @MainActor () -> Bool = { false }
+        sourceOwnsOutcome: @escaping @MainActor () -> Bool = { false }
     ) {
         self.action = action
-        self.sourceReportsFailure = sourceReportsFailure
+        self.sourceOwnsOutcome = sourceOwnsOutcome
     }
 
     func run(_ policy: LoadPolicy) async {
@@ -68,7 +68,7 @@ final class CompositionLoad {
         } catch {
             guard currentTask == task, !Task.isCancelled,
                   !(error is CancellationError) else { return }
-            if !sourceReportsFailure() { self.error = error }
+            if !sourceOwnsOutcome() { self.error = error }
         }
     }
 }
@@ -125,12 +125,13 @@ public final class Composition<Output: Sendable>: AsyncSequence {
 
     /// Runs all configured loading actions concurrently and waits for completion.
     ///
-    /// Required action failures are published as outcomes, rather than thrown;
-    /// optional failures do not fail the composition. Siblings continue after a
-    /// failure. Cancellation propagates to actions and is not published as an
-    /// error. Overlapping calls run independently; the newest invocation of each
-    /// action owns its error state. Bucket loading policies still govern source
-    /// work. Duplicate declarations invoke their actions independently.
+    /// Required action failures can fail the outcome. A bucket input with an
+    /// available snapshot still contributes its value. Read that bucket's `error`
+    /// for its refresh failure. Siblings continue after a failure. Cancellation
+    /// propagates to actions without publishing an error. Overlapping calls run
+    /// independently, and the newest invocation of each action owns its error
+    /// state. Bucket loading policies still govern source work. Duplicate
+    /// declarations invoke their actions independently.
     public func load(using policy: LoadPolicy = .cached) async {
         activeLoads += 1
         defer { activeLoads -= 1 }

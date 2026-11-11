@@ -100,16 +100,3 @@ nonisolated public struct Key<Value: Sendable>: ContinuumKeySpace {
         nil
     }
 }
-
-/// An observable data bucket anchored to one singleton ``Key``.
-public typealias DataBucket<Value: Sendable> = Bucket<
-    Key<Value>,
-    UnpartitionedBucketScope
->
-
-/// A partitioned observable bucket whose partitions each own one singleton
-/// ``Key`` snapshot.
-public typealias PartitionedDataBucket<
-    Partition: Hashable & Sendable,
-    Value: Sendable
-> = PartitionedBucket<Partition, Key<Value>>

@@ -8,8 +8,8 @@ nonisolated enum Purpose: Hashable, Sendable {
   case buy, sell
 }
 
-let accounts = Bucket(
-  IndexedKey<Account.ID, Account>("accounts"),
+let accounts: PartitionedIdentifiedBucket<Purpose, Account> = Bucket(
+  IndexedKey("accounts"),
   partitionedBy: Purpose.self
 ) { purpose in
   LocalSource { try await database.accounts(purpose: purpose) }
@@ -29,9 +29,12 @@ Add `staleAfter: .seconds(300)` after `partitionedBy:` to give each partition
 its own freshness interval. A refresh of `.buy` does not renew `.sell`.
 [Snapshot freshness →](loading.md#refresh-stale-snapshots)
 
-`IndexedKey` uses an identifiable model's `id`. For a different index, pass
-`indexedBy: \.code` or a sendable closure. Stored key-path variables must retain
-`& Sendable` in their declared type.
+`PartitionedIdentifiedBucket<Purpose, Account>` infers the index type from
+`Account.ID`, and `IndexedKey("accounts")` uses the model's `id`. To select
+entries by a string code, declare `PartitionedIndexedBucket<Purpose, String, Account>`
+and pass `indexedBy: \.code` or a sendable closure. Stored key-path variables must
+retain `& Sendable` in their declared type. For a singleton snapshot in each
+partition, use `PartitionedValueBucket<Partition, Value>` with `Key`.
 
 Partition keys must be `Hashable & Sendable`. Use a single query struct when
 several fields identify a snapshot; authentication or tracing context belongs

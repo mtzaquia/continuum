@@ -34,11 +34,11 @@ public struct LoadState: Sendable {
     /// A successfully loaded empty indexed snapshot sets this value to `true`.
     public let isLoaded: Bool
 
-    /// The latest snapshot-loading, mutation, persistence, or invalidation error.
+    /// The latest collection load, entry load, mutation, persistence, or invalidation error.
     ///
     /// Starting source work or a mutation clears the previous error. A cached
-    /// memory hit preserves it. A reset clears it on success. Continuation failures are reported separately by
-    /// ``PaginationState``.
+    /// memory hit preserves it. A reset clears it on success. Continuation
+    /// failures are reported separately by ``PaginationState``.
     public let error: (any Error)?
 
     init(

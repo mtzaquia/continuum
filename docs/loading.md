@@ -21,8 +21,8 @@ load. Both remote-reaching policies require a `RemoteSource`.
 Set `staleAfter` to make cached snapshot loads refresh data after a duration:
 
 ```swift
-let posts = Bucket(
-  IndexedKey<Post.ID, Post>("posts"),
+let posts: IdentifiedBucket<Post> = Bucket(
+  IndexedKey("posts"),
   staleAfter: .seconds(300)
 ) {
   LocalSource { try await database.posts() }
@@ -60,7 +60,7 @@ a failed reset restores the original interval with the previous snapshot.
 Add `LoadEntry` after `Load` (or `NextPage` for a paginated source):
 
 ```swift
-let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
+let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
   RemoteSource {
     Load { try await client.authors() }
     LoadEntry { id in try await client.author(id: id) }
@@ -79,21 +79,29 @@ and have no independent freshness interval.
 
 An entry already in the collection is replaced in place and persisted before
 publication. An absent entry is returned without insertion or persistence.
-Ordering, pagination, and whole-list loading state remain unchanged. The returned
-index must match the request; errors throw without failing or changing the list.
+Entry loading preserves ordering, pagination, and whole-list `isLoading` and
+`isLoaded`. The returned index must match the request. Entry failures throw and
+set `error` while preserving the collection outcome. Starting another entry
+fetch clears the error. A cached entry hit preserves it.
 Reset and superseding collection operations cancel pending entry work.
 
 ## Read loading state
 
-- `isLoaded`: a complete snapshot has been established, including an empty one.
-- `isLoading`: source work is active, possibly alongside established data.
-- `error`: the latest load, mutation, persistence, or invalidation failure.
-- `latest`: the observable `Update<Snapshot>` result or reset.
+- `isLoaded` indicates an established complete snapshot, including an empty one.
+- `isLoading` tracks active collection loads, including refreshes.
+- `error` and `state.error` expose the latest collection load, entry load,
+  mutation, persistence, or invalidation error. Read `nextPageError` for a
+  failed continuation.
+- `latest` and iteration report snapshot availability. An established snapshot
+  is `.result(.success(snapshot))`. A collection load failure without a
+  snapshot is `.result(.failure(error))`. Reset clears availability.
 
-A failed refresh preserves the established snapshot in the value accessors,
-but `latest` reports the failure. A cached memory hit preserves that error;
-starting source work clears it. Successful remote loads finish local
-persistence before publishing. [Persistence details →](persistence.md)
+A failed refresh throws to its caller and leaves the established snapshot
+available to existing and new observers. If a mutation or reset rolls back,
+observers receive the restored snapshot when one existed. A cached memory hit
+preserves the current error. Starting source work or a mutation clears it.
+Successful remote loads finish local persistence before publishing.
+[Persistence details →](persistence.md)
 
 A bucket with no sources is for in-memory mutations. Calling `load()` warns
 and throws `missingRemoteSource` if no snapshot exists.
@@ -123,7 +131,8 @@ await feed.load(using: .remote)
 
 Composition forwards policies unchanged to every configured action. Independent
 inputs load concurrently; a resolved input loads its root before its related
-keys. `load` returns `Void`, with required failures delivered through `latest`
-and iteration. [Composition loading →](composition.md#load-the-composition)
+keys. `load` returns `Void`. An available bucket snapshot continues to contribute
+its value after a failed refresh. Read the bucket's `error` to present that
+failure. [Composition loading →](composition.md#load-the-composition)
 
 Next: [Persistence](persistence.md) · [Compositions](composition.md)

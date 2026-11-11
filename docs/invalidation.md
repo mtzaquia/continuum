@@ -8,8 +8,10 @@ try await posts.reset()
 
 Reset supersedes source work and mutations, clears memory and pagination, and
 sends `nil` to writable local sources. This prevents a later cached load from
-restoring stale data. A persistence failure restores the previous state,
-attempts to restore storage, and throws. [Persistence rules →](persistence.md)
+restoring stale data. If persistence fails, reset restores the previous
+availability, attempts to restore storage, and throws. An established snapshot
+is available again as `.result(.success(snapshot))`. Read the reset failure
+through `error` or `state.error`. [Persistence rules →](persistence.md)
 
 ## Observe application events
 
@@ -37,8 +39,8 @@ on first access, so an application-wide signal is observed once per accessed
 partition.
 
 A failed reset leaves the subscription running so a later event can retry.
-Sequence completion ends that subscription; a sequence error becomes the
-bucket's error and ends it.
+Sequence completion ends that subscription. A sequence error sets the bucket's
+`error` and ends the subscription while preserving the current availability.
 
 ## Understand observable resets
 

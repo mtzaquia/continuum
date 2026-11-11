@@ -6,12 +6,12 @@ struct FreshnessTests {
     @Test("Original initializer signatures remain usable as function values")
     func originalInitializerReferences() async throws {
         typealias Configuration = BucketConfiguration<Key<Int>>
-        let makeBucket: @MainActor (Key<Int>, () -> Configuration) -> DataBucket<Int> = Bucket.init
+        let makeBucket: @MainActor (Key<Int>, () -> Configuration) -> ValueBucket<Int> = Bucket.init
         let makePartitioned: @MainActor (
             Key<Int>,
             String.Type,
             @escaping @MainActor @Sendable (String) -> Configuration
-        ) -> PartitionedDataBucket<String, Int> = Bucket.init
+        ) -> PartitionedValueBucket<String, Int> = Bucket.init
         let service = Service()
         let configuration = Configuration(remoteSources: [
             RemoteSource { try await service.load() },
@@ -153,9 +153,8 @@ struct FreshnessTests {
         #expect(bucket.isLoaded)
         #expect(!bucket.isLoading)
         #expect(bucket.error is Failure)
-        guard case .result(.failure) = bucket.latest else {
-            Issue.record("Expected the refresh failure as the latest outcome")
-            return
+        if case .result(.success(1)) = bucket.latest {} else {
+            Issue.record("Expected the retained snapshot as the latest outcome")
         }
         service.failLoad = false
         #expect(try await bucket.load() == 3)
