@@ -132,7 +132,7 @@ await feed.load(using: .remote)
 Composition forwards policies unchanged to every configured action. Independent
 inputs load concurrently; a resolved input loads its root before its related
 keys. `load` returns `Void`. An available bucket snapshot continues to contribute
-its value after a failed refresh. Read the bucket's `error` to present that
-failure. [Composition loading →](composition.md#load-the-composition)
+its value after a failed refresh. Observe the composition's `error` to present
+that failure. [Composition loading →](composition.md#load-the-composition)
 
 Next: [Persistence](persistence.md) · [Compositions](composition.md)

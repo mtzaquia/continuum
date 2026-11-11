@@ -166,9 +166,13 @@ struct CompositionTests {
             return language.uppercased()
         }
         var iterator = composition.makeAsyncIterator()
-        #expect(isFailure(await iterator.next()))
+        if case .result(.failure(let error as CompositionError))? = await iterator.next() {
+            #expect(error.errors.first is TestError)
+        } else { Issue.record("Expected the mapped transform error") }
+        #expect((composition.error as? CompositionError)?.errors.first is TestError)
         preferences.language = "nl"
         #expect(success(await iterator.next()) == "NL")
+        #expect(composition.error == nil)
     }
 
     @Test("Subscribers receive independent updates and cancel independently")
@@ -224,6 +228,8 @@ struct CompositionTests {
 
         await composition.load(using: .remote)
         #expect(partition.error is TestError)
+        #expect((composition.error as? CompositionError)?.errors.count == 1)
+        #expect((composition.error as? CompositionError)?.errors.first is TestError)
         #expect(success(composition.latest) == 11)
         #expect(success(try await firstUpdate(composition)) == 11)
 
@@ -560,22 +566,96 @@ struct CompositionTests {
         weakBucket = nil
     }
 
-    @Test("Failure mapping sees every required failure in declaration order")
-    func failureMapping() {
+    @Test("A single mapping of all input errors supplies latest and error")
+    func failureMapping() throws {
         let first = Source<Int>(.result(.failure(NumberedError(number: 1))))
         let second = Source<Int>(.result(.failure(NumberedError(number: 2))))
         let third = Source<Int>(.result(.failure(NumberedError(number: 3))))
-        var numbers: [Int] = []
+        var calls = 0
         let composition = Composition {
             Input(first)
             Input(second).optional()
             Input(third)
         } mapFailures: { errors in
-            numbers = errors.compactMap { ($0 as? NumberedError)?.number }
-            return TestError.failed
+            calls += 1
+            return MappedError(numbers: errors.compactMap { ($0 as? NumberedError)?.number })
         } transform: { $0 + ($1 ?? 0) + $2 }
-        #expect(isFailure(composition.latest))
-        #expect(numbers == [1, 3])
+        let mapped = try #require(composition.error as? MappedError)
+        #expect(calls == 1)
+        #expect(mapped.numbers == [1, 2, 3])
+        if case .result(.failure(let error as MappedError)) = composition.latest {
+            #expect(error === mapped)
+        } else { Issue.record("Expected required failures in latest") }
+    }
+
+    @Test("A new operation error updates the shared failure while an input is blocked")
+    func failureMappingAfterOperationError() async throws {
+        let bucket = Bucket(IndexedKey<Int, Favorite>("composition.shared-error", indexedBy: \.id))
+        try await bucket.store(Favorite(id: 1))
+        let required = Source<Int>(.result(.failure(NumberedError(number: 1))))
+        let composition = Composition {
+            Input(required)
+            Input(bucket)
+        } transform: { $0 + $1.count }
+        var updates = composition.makeAsyncIterator()
+        #expect(isFailure(await updates.next()))
+
+        await #expect(throws: ContinuumError.self) { try await bucket.load(id: 1, using: .remote) }
+        guard case .result(.failure(let published as CompositionError))? = await updates.next() else {
+            Issue.record("Expected the updated aggregate failure")
+            return
+        }
+        let current = try #require(composition.error as? CompositionError)
+        for error in [published, current] {
+            #expect(error.errors.count == 2)
+            #expect((error.errors.first as? NumberedError)?.number == 1)
+            #expect(error.errors.last is ContinuumError)
+        }
+    }
+
+    @Test("The default aggregate flattens nested input errors in declaration order")
+    func nestedFailureMapping() {
+        let first = Source<Int>(.result(.failure(NumberedError(number: 1))))
+        let second = Source<Int>(.result(.failure(NumberedError(number: 2))))
+        let third = Source<Int>(.result(.failure(NumberedError(number: 3))))
+        let child = Composition {
+            Input(first)
+            Input(second).optional()
+        } mapFailures: { _ in TestError.failed } transform: { $0 + ($1 ?? 0) }
+        let parent = Composition {
+            Input(child).optional()
+            Input(third).optional()
+        } transform: { ($0 ?? 0) + ($1 ?? 0) }
+
+        #expect(success(parent.latest) == 0)
+        let aggregate = parent.error as? CompositionError
+        #expect(aggregate?.errors.compactMap { ($0 as? NumberedError)?.number } == [1, 2, 3])
+    }
+
+    @Test("An externally failed entry load updates observable composition error without transforming")
+    func observesOperationErrors() async throws {
+        let bucket = Bucket(IndexedKey<Int, Favorite>("composition.entry-error", indexedBy: \.id))
+        try await bucket.store(Favorite(id: 1))
+        var transforms = 0
+        let composition = Composition { Input(bucket) } transform: { favorites in
+            transforms += 1
+            return favorites.count
+        }
+        let (changes, changed) = AsyncStream<Void>.makeStream()
+        var observed = changes.makeAsyncIterator()
+        withObservationTracking { _ = composition.error } onChange: { changed.yield(()) }
+
+        await #expect(throws: ContinuumError.self) { try await bucket.load(id: 1, using: .remote) }
+        _ = await observed.next()
+        #expect((composition.error as? CompositionError)?.errors.first is ContinuumError)
+        #expect(success(composition.latest) == 1)
+        #expect(transforms == 1)
+
+        var updates = composition.makeAsyncIterator()
+        #expect(success(await updates.next()) == 1)
+        try await bucket.reset()
+        #expect(isReset(await updates.next()))
+        #expect(composition.error == nil)
     }
 
     @Test("Releasing an iterator releases its subscription and retained composition")
@@ -644,6 +724,10 @@ private func isFailure<T>(_ update: Update<T>?) -> Bool {
 }
 
 private struct NumberedError: Error { let number: Int }
+private nonisolated final class MappedError: Error {
+    let numbers: [Int]
+    init(numbers: [Int]) { self.numbers = numbers }
+}
 
 
 @concurrent private func firstUpdate<Source: AsyncSequence & Sendable>(_ source: Source) async throws -> Update<Int>?

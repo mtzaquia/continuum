@@ -110,6 +110,7 @@ let titles = Composition {
 
 await titles.load()
 let current = titles.latest
+let error = titles.error
 
 for await update in titles {
   switch update {
@@ -123,6 +124,9 @@ for await update in titles {
 Add `Input` declarations to combine sources. Inputs are required by default;
 `.optional()` supplies nil when unavailable or failed. `.resolving` derives
 relationships from a collection's keys. Iteration itself never starts a load.
+Observe `error` for current input and transform errors, including failed
+refreshes with retained data. The default `CompositionError` lists them in
+input order.
 [Build a live composition →](docs/composition.md)
 
 ## Guides

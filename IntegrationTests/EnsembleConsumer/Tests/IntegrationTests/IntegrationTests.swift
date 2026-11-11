@@ -78,6 +78,9 @@ struct IntegrationTests {
         _ = await received.next()
         await data.reload()
         #expect(bucket.error is Failure)
+        let aggregate = composition.error as? CompositionError
+        #expect(aggregate?.errors.count == 1)
+        #expect(aggregate?.errors.first is Failure)
         sibling.update = .result(.success(2))
         while let update = await received.next() {
             guard case .result(.success(let value)) = update else {

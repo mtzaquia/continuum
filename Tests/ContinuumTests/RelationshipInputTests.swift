@@ -276,6 +276,25 @@ struct RelationshipInputTests {
         #expect(isFailure(try #require(await iterator.next())))
     }
 
+    @Test("A relationship forwards its root's refresh error while retaining the resolved pair")
+    func retainedRootRefreshError() async throws {
+        let posts = Bucket(Key<[Post]>("posts.refresh-error")) {
+            RemoteSource { throw LookupError.failed }
+        }
+        let snapshot = [Post(id: 1, authorID: 1)]
+        try await posts.store(snapshot)
+        let composition = Composition {
+            Input(posts).resolving(\.authorID) { _, _ in "one" }
+        } transform: { posts, authors in Pair(posts: posts, authors: authors) }
+        let expected = Pair(posts: snapshot, authors: [1: "one"])
+        await until { value(composition.latest) == expected }
+
+        await #expect(throws: LookupError.self) { try await posts.load(using: .remote) }
+        await until { composition.error != nil }
+        #expect((composition.error as? CompositionError)?.errors.first is LookupError)
+        #expect(value(composition.latest) == expected)
+    }
+
     @Test("Indexed bucket reset history survives recovery and nested observation")
     func nestedResetHistory() async throws {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {

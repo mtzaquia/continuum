@@ -98,10 +98,15 @@ public extension CompositionBuilder {
         _ input: ResolvedInput<Element, ID, Resolved>
     ) -> CompositionInputs<[Element], [ID: Resolved]> {
         .init(makeInputs: {
-            let state = RelationshipInputState(root: input.root.resolved(), key: input.key, select: input.select)
+            let root = input.root.resolved()
+            let state = RelationshipInputState(root: root, key: input.key, select: input.select)
             state.start()
             return (
-                Input(read: { state.rootState }, load: { policy in await state.load(policy) }),
+                Input(read: {
+                    var snapshot = state.rootState
+                    snapshot.reportedFailures = { root.read().reportedFailures?() }
+                    return snapshot
+                }, load: { policy in await state.load(policy) }),
                 Input(read: { state.relatedState })
             )
         })

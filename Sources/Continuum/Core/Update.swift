@@ -252,7 +252,9 @@ func makeBucketObservation<Output: Sendable>(
 }
 
 // A bucket's outcome remains authoritative when its load action throws with data available.
-protocol BucketSnapshotSource: UpdateSource {}
+protocol BucketSnapshotSource: UpdateSource {
+    var error: (any Error)? { get }
+}
 
 extension Bucket: UpdateSource, BucketSnapshotSource where Scope == UnpartitionedBucketScope {}
 

@@ -11,7 +11,11 @@
   collection load without a snapshot still publishes failure.
 - Required bucket inputs continue to contribute their retained snapshots to
   compositions after a refresh fails. Ensemble bindings receive successful data
-  and can read refresh failures separately from the owning bucket.
+  and can observe the composition's `error` for refresh feedback.
+- `Composition.error` reports current input and transform errors, including
+  errors from optional and nested inputs. `mapFailures:` maps the full list
+  once, and a failed `latest` shares the same mapped error. The default returns
+  an ordered `CompositionError`.
 
 This changes observable behavior even though existing `Update` switches still
 compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).

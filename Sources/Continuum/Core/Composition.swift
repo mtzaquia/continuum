@@ -23,18 +23,39 @@
 import Foundation
 import Observation
 
+/// The default aggregate for errors reported by a composition.
+nonisolated public struct CompositionError: LocalizedError {
+    /// The underlying errors in input declaration order.
+    public let errors: [any Error]
+
+    /// Creates an aggregate, expanding nested aggregates in place.
+    public init(_ errors: [any Error]) {
+        self.errors = errors.flatMap { ($0 as? CompositionError)?.errors ?? [$0] }
+    }
+
+    /// The description of the first underlying error.
+    public var errorDescription: String? { errors.first?.localizedDescription }
+}
+
 @MainActor
 struct CompositionInputState<Value: Sendable> {
     let value: Value?
     let unavailable: Bool
     let failures: [any Error]
     var resetRevision: UInt = 0
+    // A separate read keeps error-only changes out of snapshot observation.
+    var reportedFailures: (@MainActor () -> [any Error]?)? = nil
 }
 
 // Internal invalidation history survives observation coalescing across compositions.
 @MainActor
 protocol CompositionResetSource: AnyObject {
     var compositionResetRevision: UInt { get }
+}
+
+@MainActor
+protocol CompositionErrorSource: AnyObject {
+    var underlyingErrors: [any Error] { get }
 }
 
 @MainActor
@@ -75,9 +96,16 @@ final class CompositionLoad {
 
 @MainActor
 struct CompositionEvaluation<Output: Sendable> {
+    enum Outcome {
+        case waiting
+        case success(Output)
+        case failure
+    }
+
     let unavailable: [Bool]
-    let result: Result<Output, any Error>?
-    var resetRevisions: [UInt] = []
+    let outcome: Outcome
+    let resetRevisions: [UInt]
+    let reportErrors: @MainActor () -> (underlying: [any Error], mapped: (any Error)?)
 }
 
 /// A shared live composition whose outcomes can be observed or iterated.
@@ -101,10 +129,18 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     /// The current outcome, initially `.reset`. Loading does not clear it.
     public private(set) var latest: Element = .reset
 
+    /// The current errors from inputs and the transform, mapped by `mapFailures`.
+    ///
+    /// Includes optional and nested input errors and can coexist with a successful
+    /// ``latest``. A failed ``latest`` carries the same mapped error. Returns `nil`
+    /// when no errors are reported.
+    public private(set) var error: (any Error)?
+
     /// Whether any composition load call is still executing its actions.
     public var isLoading: Bool { activeLoads > 0 }
 
     private(set) var compositionResetRevision: UInt = 0
+    private(set) var underlyingErrors: [any Error] = []
     private var activeLoads = 0
     @ObservationIgnored private let evaluate: @MainActor () -> CompositionEvaluation<Output>
     @ObservationIgnored private let loads: [@MainActor @Sendable (LoadPolicy) async -> Void]
@@ -113,6 +149,8 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     @ObservationIgnored private var previousResetRevisions: [UInt] = []
     @ObservationIgnored private var hasResult = false
     @ObservationIgnored private let observation = ObservationSubscription()
+    @ObservationIgnored private let errorObservation = ObservationSubscription()
+    @ObservationIgnored private var reportErrors: (@MainActor () -> (underlying: [any Error], mapped: (any Error)?))?
 
     init(
         loads: [@MainActor @Sendable (LoadPolicy) async -> Void],
@@ -126,8 +164,8 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     /// Runs all configured loading actions concurrently and waits for completion.
     ///
     /// Required action failures can fail the outcome. A bucket input with an
-    /// available snapshot still contributes its value. Read that bucket's `error`
-    /// for its refresh failure. Siblings continue after a failure. Cancellation
+    /// available snapshot still contributes its value. Read ``error`` for its
+    /// refresh failure. Siblings continue after a failure. Cancellation
     /// propagates to actions without publishing an error. Overlapping calls run
     /// independently, and the newest invocation of each action owns its error
     /// state. Bucket loading policies still govern source work. Duplicate
@@ -147,18 +185,40 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         let state = observation.track { evaluate() } onChange: { [weak self] in
             self?.recompute()
         }
+        reportErrors = state.reportErrors
+        recomputeErrors()
+        let update: Element? = switch state.outcome {
+        case .waiting: nil
+        case .success(let output): .result(.success(output))
+        case .failure: error.map { .result(.failure($0)) }
+        }
         let reset = zip(state.unavailable, previousUnavailable).contains { $0 && !$1 }
         let nestedReset = zip(state.resetRevisions, previousResetRevisions).contains { $0 != $1 }
         previousUnavailable = state.unavailable
         previousResetRevisions = state.resetRevisions
-        if hasResult && (reset || nestedReset || state.result == nil) {
+        if hasResult && (reset || nestedReset || update == nil) {
             publish(.reset)
             hasResult = false
         }
-        if let result = state.result {
-            publish(.result(result))
+        if let update {
+            publish(update)
             hasResult = true
         }
+    }
+
+    private func recomputeErrors() {
+        guard let reportErrors else { return }
+        let errors = errorObservation.track { reportErrors() } onChange: { [weak self] in
+            // Let snapshot evaluation handle changes observed by both passes.
+            guard let self, self.observation.change.isCurrent else { return }
+            self.recomputeErrors()
+            if case .result(.failure) = self.latest, let error = self.error {
+                self.publish(.result(.failure(error)))
+            }
+        }
+        guard !underlyingErrors.isEmpty || !errors.underlying.isEmpty else { return }
+        underlyingErrors = errors.underlying
+        error = errors.mapped
     }
 
     private func publish(_ update: Element) {
@@ -215,7 +275,7 @@ final class BucketObservationLifetime: Sendable {
 }
 
 
-extension Composition: UpdateSource, CompositionResetSource {}
+extension Composition: UpdateSource, CompositionResetSource, CompositionErrorSource {}
 
 public extension Composition {
     /// Creates a live, observable and asynchronously iterable snapshot composition.
@@ -230,11 +290,15 @@ public extension Composition {
     ///
     /// - Parameters:
     ///   - inputs: The snapshot and observable dependencies in transform order.
-    ///   - mapFailures: Combines current required failures in declaration order.
+    ///   - mapFailures: Combines the full list of errors in declaration order,
+    ///     followed by any thrown transform error. The default creates a
+    ///     ``CompositionError``. Each evaluation maps the list once and shares
+    ///     the result between ``error`` and any failure in ``latest``. Keep the
+    ///     closure free of side effects.
     ///   - transform: Produces an output when all required inputs are available.
     convenience init<each Value: Sendable>(
         @CompositionBuilder _ inputs: () -> CompositionInputs<repeat each Value>,
-        mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
+        mapFailures: @escaping @MainActor ([any Error]) -> any Error = { CompositionError($0) },
         transform: @escaping @MainActor (repeat each Value) throws -> Output
     ) {
         let inputs = inputs().makeInputs()
@@ -245,27 +309,33 @@ public extension Composition {
         self.init(loads: loads) {
             let states = (repeat (each inputs).read())
             var unavailable: [Bool] = []
-            var failures: [any Error] = []
+            var hasBlockingFailure = false
+            var reports: [(failures: [any Error], read: (@MainActor () -> [any Error]?)?)] = []
             var resetRevisions: [UInt] = []
             for state in repeat each states {
                 unavailable.append(state.unavailable)
                 resetRevisions.append(state.resetRevision)
-                failures.append(contentsOf: state.failures)
+                hasBlockingFailure = hasBlockingFailure || !state.failures.isEmpty
+                reports.append((state.failures, state.reportedFailures))
             }
-            if !failures.isEmpty {
-                return .init(unavailable: unavailable, result: .failure(mapFailures(failures)),
-                             resetRevisions: resetRevisions)
+            let outcome: CompositionEvaluation<Output>.Outcome
+            var transformError: (any Error)?
+            if hasBlockingFailure {
+                outcome = .failure
+            } else if unavailable.contains(true) {
+                outcome = .waiting
+            } else {
+                do {
+                    outcome = .success(try transform(repeat (each states).value!))
+                } catch {
+                    outcome = .failure
+                    transformError = error
+                }
             }
-            if unavailable.contains(true) {
-                return .init(unavailable: unavailable, result: nil, resetRevisions: resetRevisions)
-            }
-            do {
-                return .init(unavailable: unavailable,
-                             result: .success(try transform(repeat (each states).value!)),
-                             resetRevisions: resetRevisions)
-            } catch {
-                return .init(unavailable: unavailable, result: .failure(error),
-                             resetRevisions: resetRevisions)
+            return .init(unavailable: unavailable, outcome: outcome, resetRevisions: resetRevisions) {
+                var errors = reports.flatMap { $0.read?() ?? $0.failures }
+                if let transformError { errors.append(transformError) }
+                return (errors, errors.isEmpty ? nil : mapFailures(errors))
             }
         }
     }

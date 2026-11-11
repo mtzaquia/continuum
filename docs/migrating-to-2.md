@@ -28,15 +28,20 @@ availability. Pagination continues to report errors through `nextPageError`.
 Remove any custom `UpdateSource` adapter whose purpose was to turn a failure
 with retained data back into success. Pass the bucket or selected partition
 directly to `Input`, including when you configure a load action. The transform
-can still run as other inputs change. Observe the original bucket for refresh
-errors. `mapFailures:` still handles required input failures that reach the
-composition, including failed relationship lookups. A throwing transform still
-fails the output.
+can still run as other inputs change. Read `composition.error` for the current
+errors, including failures from optional and nested inputs.
+
+By default, failures in `latest` now carry a `CompositionError`, even for a
+single error. Inspect its `errors` array to recover the underlying types. A
+custom `mapFailures:` now receives the full list of current errors, including
+optional input errors and any error thrown by the transform. Its return value
+sets `composition.error` and is shared by `latest` whenever the outcome fails.
+[Error mapping →](composition.md#observe-composition-errors)
 
 ## Update Ensemble error presentation
 
 Keep forwarding `.result` to the sink and `.reset` to `sink.reset()`. A failed
 refresh that retains data now reaches `ViewData` as success, so failure-phase
-handlers will only see actual failure outcomes. Observe the source bucket's
-`error` separately for a banner or other refresh feedback. See the
+handlers will only see actual failure outcomes. Observe `composition.error`
+for a composed screen or `bucket.error` for a direct bucket binding. See the
 [Ensemble binding example](composition.md#bind-to-ensemble).

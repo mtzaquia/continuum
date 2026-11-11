@@ -52,10 +52,8 @@ establish a value or wait for a future sequence element.
 
 Composition loading returns `Void`. A bucket input with an established snapshot
 continues to supply its value after its load action throws. Sibling changes still
-reach the output, and new subscribers receive the composed value. Read the
-bucket's observable `error` or `state.error` to present the refresh failure.
-Composition leaves those errors with their owning buckets so nested inputs
-keep the same error and recovery source.
+reach the output, and new subscribers receive the composed value. Observe the
+composition's `error` to present the refresh failure alongside the retained data.
 
 A required bucket whose collection load fails without a snapshot fails the
 composition. Published input failures follow the source's recovery. Other
@@ -96,11 +94,9 @@ current result if present; initial and repeated unavailability stay silent.
 | Failure | Fail the combined outcome | Supply nil |
 | Reset | Clear the previous outcome and wait | Supply nil |
 
-Failures do not end observation. A throwing transform also produces a failure.
-The default error is the first required failure in declaration order. Use
-`mapFailures:` before `transform:` to combine them. A retained bucket snapshot
-is a success for required and optional inputs. Its operation error stays on
-the bucket and is outside `mapFailures:`.
+Failures do not end observation. A throwing transform produces a failure with
+the mapped error. A retained bucket snapshot supplies its value to required and
+optional inputs.
 
 If a required reset accompanies a failure, the composition emits reset first
 so consumers can clear invalid retained data. Reset history from buckets and
@@ -109,6 +105,20 @@ observing; resets do not invoke loading actions or restart subscriptions.
 
 Each iterator is independent. Observation may coalesce changes, equal results
 may repeat, and buffering is unbounded. [Ownership and buffering →](resource-lifetime.md)
+
+## Observe composition errors
+
+`error` is observable and can be set while `latest` is successful. It includes
+current errors from required and optional inputs, including bucket operation
+errors with retained data. Nested compositions contribute their underlying errors
+in place. The order follows input declaration order, with a thrown transform
+error last. Errors clear as their sources recover.
+
+The default `mapFailures:` returns a `CompositionError` with an ordered `errors`
+array. Each evaluation maps the full list once when errors are present. If a
+required input blocks the transform or the transform throws, `latest` publishes
+the same mapped error as `error`. That failure can include errors from optional
+inputs. Keep the mapper free of side effects.
 
 ## Resolve relationships
 
@@ -252,7 +262,7 @@ optional layer. Loops and dynamically changing input counts are not supported.
 
 [Ensemble](https://github.com/mtzaquia/ensemble) is a separate SwiftUI library
 for presentation state. An Ensemble 3 model can pass each Continuum outcome
-to `ViewData` and read refresh errors directly from the source bucket.
+to `ViewData` and expose the composition's errors alongside it.
 
 ```swift
 import Ensemble
@@ -260,6 +270,7 @@ import Ensemble
 @MainActor
 final class DisplayUserModel {
   let displayUser: Composition<DisplayUser>
+  var error: (any Error)? { displayUser.error }
 
   @ViewDataSource(
     make: { (model: Self) in model.displayUser },
@@ -283,7 +294,7 @@ Retain the model for the life of the feature. `AsyncContent` connects the source
 when rendered. Call `viewData.connect()` if consuming it without `AsyncContent`.
 The binding starts empty, and reset clears the displayed value. A failed bucket
 refresh with retained data delivers success to `ViewData`. To show a refresh
-banner or log the failure, observe the input bucket's `error` separately.
+banner or log the failure, observe the model's `error`.
 [Migration guide →](migrating-to-2.md)
 
 The [consumer fixture](../IntegrationTests/EnsembleConsumer/README.md) verifies

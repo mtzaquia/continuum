@@ -135,19 +135,30 @@ public struct Input<Value: Sendable> {
     private init<Source: UpdateSource>(
         _ source: Source, loader: CompositionLoad?
     ) where Source.Snapshot == Value {
+        let bucket = source as? any BucketSnapshotSource
+        let nested = source as? any CompositionErrorSource
         read = {
             let update = source.latest
-            let loadError = loader?.error
+            let failures = loader?.error.map { [$0] } ?? []
             let resetRevision = (source as? any CompositionResetSource)?.compositionResetRevision ?? 0
+            let reportErrors: @MainActor () -> [any Error]? = {
+                if let errors = nested?.underlyingErrors, !errors.isEmpty {
+                    if case .result(.failure) = update { return errors }
+                    return errors + failures
+                }
+                if failures.isEmpty, let error = bucket?.error { return [error] }
+                return nil
+            }
             switch update {
             case .reset:
                 return .init(value: nil, unavailable: true,
-                             failures: loadError.map { [$0] } ?? [], resetRevision: resetRevision)
+                             failures: failures, resetRevision: resetRevision, reportedFailures: reportErrors)
             case .result(.failure(let error)):
-                return .init(value: nil, unavailable: false, failures: [error], resetRevision: resetRevision)
+                return .init(value: nil, unavailable: false, failures: [error], resetRevision: resetRevision,
+                             reportedFailures: nested == nil ? nil : reportErrors)
             case .result(.success(let value)):
                 return .init(value: value, unavailable: false,
-                             failures: loadError.map { [$0] } ?? [], resetRevision: resetRevision)
+                             failures: failures, resetRevision: resetRevision, reportedFailures: reportErrors)
             }
         }
         if let loader {
@@ -171,8 +182,8 @@ public struct Input<Value: Sendable> {
 
     /// Makes unavailable and failed snapshots contribute `nil` without blocking output.
     ///
-    /// Loading participation is preserved. Optional input errors do not fail
-    /// the composition.
+    /// Loading participation is preserved. Optional input errors are available
+    /// through ``Composition/error`` while the transform receives `nil`.
     // Prefer the flattening overload when Value is already Optional, even
     // when the caller provides no contextual return type.
     @_disfavoredOverload
@@ -182,7 +193,9 @@ public struct Input<Value: Sendable> {
         return Input<Value?>(read: {
             let state = read()
             return .init(value: .some(state.failures.isEmpty ? state.value : nil),
-                         unavailable: false, failures: [])
+                         unavailable: false, failures: [], reportedFailures: {
+                             state.reportedFailures?() ?? (state.failures.isEmpty ? nil : state.failures)
+                         })
         }, load: load, materialize: factory)
     }
 
@@ -198,7 +211,9 @@ public struct Input<Value: Sendable> {
         return Input<Wrapped?>(read: {
             let state = read()
             let value: Wrapped? = state.failures.isEmpty ? (state.value ?? nil) : nil
-            return .init(value: .some(value), unavailable: false, failures: [])
+            return .init(value: .some(value), unavailable: false, failures: [], reportedFailures: {
+                state.reportedFailures?() ?? (state.failures.isEmpty ? nil : state.failures)
+            })
         }, load: load, materialize: factory)
     }
 }

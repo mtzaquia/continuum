@@ -290,9 +290,9 @@ struct LoadEntryTests {
         await composition.load()
         #expect(value(composition.latest)?[1] == Entry(1, "cached"))
         await composition.load(using: .remote)
-        if case .result(.failure(let error)) = composition.latest {
-            guard case ContinuumError.missingEntrySource = error else {
-                Issue.record("Expected ContinuumError.missingEntrySource, got \(error)")
+        if case .result(.failure(let error as CompositionError)) = composition.latest {
+            guard let first = error.errors.first, case ContinuumError.missingEntrySource = first else {
+                Issue.record("Expected ContinuumError.missingEntrySource, got \(error.errors)")
                 return
             }
         } else { Issue.record("Expected required relationship failure") }
