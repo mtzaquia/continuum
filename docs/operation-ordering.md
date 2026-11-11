@@ -9,7 +9,7 @@ suspension points.
 
 | Incoming operation | Pending work |
 | --- | --- |
-| `store` or `remove` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
+| `mutate` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
 | `reset` | Supersedes queued and running mutations, loads, entry fetches, and pages. Clears memory before awaiting local deletion. |
 | `.cached` with fresh memory | Returns the current snapshot immediately, including optimistic values. Without `staleAfter`, memory stays fresh indefinitely. |
 | `.cached` without fresh memory | Waits for pending mutations/reset, rechecks memory, then shares or starts a load. Configured freshness requires remote validation of stale or unvalidated data. |
@@ -18,10 +18,8 @@ suspension points.
 | `load(id:using:)` | Cached hits return immediately. Otherwise waits for mutations and initial loading, then shares work per ID unless `.remote` replaces it. Replacements use the mutation queue and cancel pending pages, preserving the cursor for retry. |
 | `loadNext()` | Waits for mutations/reset and initial loading, then coalesces requests for the current cursor. |
 
-Store reconciliation checks that it still owns the state before publishing
-or persisting the server-authoritative result. A page captures its base only
-after pending mutations finish. These rules prevent an older store from
-overwriting a refresh or dropping a newly published page.
+A mutation checks ownership before publishing or persisting a server response.
+A page captures its base after pending mutations finish.
 
 A forced remote load retains the current memory snapshot while it runs. If
 that snapshot was optimistic, it remains readable until the refresh resolves;
@@ -34,9 +32,9 @@ still commit after cancellation. Continuum waits for it to return before
 starting the next local operation. A successful reset therefore finishes after
 older writes and cannot be undone by one of those writes finishing late.
 
-Local source closures must eventually return or throw for queued work to
-advance. Do not await another operation on the same bucket from inside one of
-its source closures. Different partitions have separate queues; shared backing
+Local source closures and mutation handlers must return or throw for queued
+work to advance. Do not await another operation on the same bucket from inside
+one of these closures. Different partitions have separate queues. Shared backing
 stores must coordinate access from multiple partitions or direct callers.
 
 Persistence ordering is not a transaction across destinations. See
@@ -44,10 +42,11 @@ Persistence ordering is not a transaction across destinations. See
 
 ## Cancel a mutation
 
-When the caller cancels store, remove, or reset, the operation restores its
-previous memory snapshot and attempts to restore persistence if it still owns
-the state. Restoration can run despite caller cancellation. The call throws
-`CancellationError` after cleanup, without recording cancellation as `error`.
+When the caller cancels a mutation or reset, an operation that edited the
+snapshot and still owns it restores the previous memory snapshot and attempts
+to restore persistence. Restoration can run despite caller cancellation. The
+call throws `CancellationError` after cleanup, without recording cancellation
+as `error`.
 
 If reset or a forced remote load has superseded the operation, its rollback is
 skipped so it cannot overwrite the replacement. Cancellation cannot guarantee

@@ -55,8 +55,11 @@ func example() async throws {
   print(posts.values)       // Complete ordered snapshot.
   print(posts[1]?.title)    // One indexed value.
 
-  try await posts.store(Post(id: 2, title: "Another post"))
-  try await posts.remove(1)
+  try await posts.mutate { mutation in
+    try await mutation.update { posts in
+      posts.filter { $0.id != 1 } + [Post(id: 2, title: "Another post")]
+    }
+  }
 }
 ```
 
@@ -93,6 +96,12 @@ protocol PostRepository {
 `IdentifiedBucket` and `PartitionedIdentifiedBucket` infer the index type from
 the model's `Identifiable.ID`. For a custom index, use `IndexedBucket<Index, Value>`
 or `PartitionedIndexedBucket<Partition, Index, Value>` with an `indexedBy:` key.
+
+For a bucket with a typed `Mutate` handler, use the corresponding `Mutable`
+alias and pass the operation type last. For example, use
+`MutableIdentifiedBucket<Card, CardOperation>` or
+`PartitionedMutableIdentifiedBucket<ProfileID, Card, CardOperation>`.
+[Typed mutation aliases →](docs/remote-mutations.md#annotate-a-typed-bucket)
 
 ## Observe and combine
 
@@ -137,7 +146,7 @@ input order.
 | Combine values, streams, and relationships | [Compositions](docs/composition.md) |
 | Keep independent snapshots for different keys | [Partitioning](docs/partitioning.md) |
 | Save snapshots to local storage | [Persistence](docs/persistence.md) |
-| Send mutations to a server | [Remote mutations](docs/remote-mutations.md) |
+| Edit snapshots and send mutations to a server | [Remote mutations](docs/remote-mutations.md) |
 | Fetch and merge subsequent pages | [Pagination](docs/pagination.md) |
 | Clear stale data | [Invalidation](docs/invalidation.md) |
 | Understand cancellation and overlapping work | [Operation ordering](docs/operation-ordering.md) |

@@ -46,10 +46,10 @@ struct DiagnosticsTests {
             ),
             .operationCancelled(identity, operation: "load"),
             .operationFailed(identity, operation: "load", error: error),
-            .mutationRequested(identity, kind: .store, queued: false),
+            .mutationRequested(identity, kind: .mutate, queued: false),
             .mutationCompleted(
                 identity,
-                kind: .store,
+                kind: .mutate,
                 count: 3,
                 established: true
             ),
@@ -83,7 +83,7 @@ struct DiagnosticsTests {
             .localSourceStarted(identity, index: 1, total: 2),
             .localSourceMissed(identity, index: 1),
             .remoteSourceStarted(identity),
-            .remoteMutationStarted(identity, kind: .store),
+            .remoteMutationStarted(identity, kind: .mutate),
             .persistenceStarted(identity, destinations: 1),
             .persistenceCompleted(identity, destinations: 1),
         ]
@@ -157,7 +157,7 @@ struct DiagnosticsTests {
     func outcomeRendering() {
         let event = ContinuumLogEvent.mutationCompleted(
             identity,
-            kind: .store,
+            kind: .mutate,
             count: 42,
             established: true
         )
@@ -165,7 +165,7 @@ struct DiagnosticsTests {
         #expect(
             event.renderedMessage(operationID: "ABCDEF12")
                 == """
-                [mutation][op:ABCDEF12] ✓ completed store \
+                [mutation][op:ABCDEF12] ✓ completed mutate \
                 bucket="posts" version=2 instance=FACE1234 \
                 count=42 established=true
                 """

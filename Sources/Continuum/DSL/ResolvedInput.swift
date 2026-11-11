@@ -43,11 +43,11 @@ public extension Input {
     /// update retained values without clearing load errors.
     /// - Parameters:
     ///   - key: The foreign key on each root entry.
-    ///   - bucket: The indexed collection with an optional ``LoadEntry`` capability.
+    ///   - bucket: The indexed collection with an optional indexed-entry ``Load``.
     /// - Returns: A declaration contributing the root array and `[ID: Related]`.
-    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable>(
+    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable, Operation: Sendable>(
         _ key: KeyPath<Element, ID> & Sendable,
-        from bucket: IndexedBucket<ID, Related>
+        from bucket: Bucket<IndexedKey<ID, Related>, UnpartitionedBucketScope, Operation>
     ) -> ResolvedInput<Element, ID, Related> where Value == [Element] {
         resolving(key, from: bucket.storage)
     }
@@ -59,9 +59,9 @@ public extension Input {
     ///   - key: The foreign key on each root entry.
     ///   - partition: The indexed partition owning the entry loader.
     /// - Returns: A declaration contributing the root array and `[ID: Related]`.
-    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable>(
+    func resolving<Element: Sendable, ID: Hashable & Sendable, Related: Sendable, Operation: Sendable>(
         _ key: KeyPath<Element, ID> & Sendable,
-        from partition: BucketPartition<IndexedKey<ID, Related>>
+        from partition: BucketPartition<IndexedKey<ID, Related>, Operation>
     ) -> ResolvedInput<Element, ID, Related> where Value == [Element] {
         .init(root: self, key: key, select: { id in
             let entry = EntryRelationshipState(partition: partition, id: id)

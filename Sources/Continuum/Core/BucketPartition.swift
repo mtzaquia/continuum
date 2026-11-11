@@ -33,7 +33,7 @@ import Observation
 /// actor.
 @MainActor
 @Observable
-public final class BucketPartition<Space: ContinuumKeySpace> {
+public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable> {
     private enum StoredSnapshot {
         case absent
         case present(Space.Snapshot)
@@ -62,23 +62,6 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
                 return nil
             }
             return continuation
-        }
-    }
-
-    private enum Mutation: Sendable {
-        case store(Space.Value)
-        case remove(Space.Input)
-        case reset
-
-        var logKind: BucketMutationKind {
-            switch self {
-            case .store:
-                .store
-            case .remove:
-                .remove
-            case .reset:
-                .resetLocal
-            }
         }
     }
 
@@ -137,6 +120,9 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
 
     @ObservationIgnored
     private let remoteSource: RemoteSource<Space>?
+
+    @ObservationIgnored
+    private let mutationHandler: Mutate<Operation, Space>?
 
     @ObservationIgnored
     private let staleAfter: Duration?
@@ -199,7 +185,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         _ keySpace: Space,
         staleAfter: Duration? = nil,
         now: @escaping @MainActor @Sendable () -> ContinuousClock.Instant = { .now },
-        configuration: BucketConfiguration<Space> = BucketConfiguration()
+        configuration: BucketConfiguration<Space, Operation> = BucketConfiguration()
     ) {
         precondition(
             staleAfter.map { $0 >= .zero } ?? true,
@@ -208,6 +194,10 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         precondition(
             configuration.remoteSources.count <= 1,
             "A data bucket accepts at most one RemoteSource."
+        )
+        precondition(
+            configuration.mutations.count <= 1,
+            "A data bucket accepts at most one Mutate handler."
         )
 
         let localSources = configuration.localSources
@@ -221,6 +211,7 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         self.localSources = localSources
         self.logIdentity = logIdentity
         remoteSource = configuration.remoteSources.first
+        mutationHandler = configuration.mutations.first
         persistence = LocalPersistenceCoordinator(
             sources: localSources,
             logIdentity: logIdentity
@@ -405,40 +396,23 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
         }
     }
 
-    /// Inserts or replaces one value in the atomic snapshot.
+    /// Runs an operation in this partition's mutation queue.
     ///
-    /// For an ``IndexedKey``, the key's index operation selects the entry and
-    /// replacement retains its insertion position. This operation establishes a
-    /// complete snapshot and supersedes source work. It immediately publishes
-    /// and persists the submitted value. When ``RemoteSource`` declares
-    /// ``Store``, Continuum then reconciles the server-authoritative value.
-    ///
-    /// - Parameter value: The value to insert or replace.
-    /// - Throws: An error raised by ``Store`` or a writable ``LocalSource``.
-    ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence. Caller
-    ///   cancellation also restores state if no newer operation owns it, but
-    ///   does not become the bucket's error.
-    public func store(_ value: Space.Value) async throws {
-        try await enqueue(.store(value))
-    }
-
-    /// Removes one value from the atomic snapshot.
-    ///
-    /// Indexed snapshots remain established when their final value is removed.
-    /// Removing a singleton value returns that bucket to an unloaded state.
-    /// The normalized result is immediately published and persisted. When
-    /// ``RemoteSource`` declares ``Remove``, that operation then confirms the
-    /// mutation.
-    ///
-    /// - Parameter input: The value to remove.
-    /// - Throws: An error raised by ``Remove`` or a writable ``LocalSource``.
-    ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence. Caller
-    ///   cancellation also restores state if no newer operation owns it, but
-    ///   does not become the bucket's error.
-    public func remove(_ input: Space.Input) async throws {
-        try await enqueue(.remove(input))
+    /// The handler can publish and persist an optimistic edit before calling
+    /// a service. A failure rolls back owned edits. Reset and forced remote
+    /// loads supersede queued and running mutations.
+    public func mutate(_ operation: Operation) async throws {
+        let action: MutationAction<Space>
+        if let handler = mutationHandler?.operation {
+            action = { mutation in try await handler(operation, mutation) }
+        } else if let direct = operation as? MutationAction<Space> {
+            action = direct
+        } else {
+            throw ContinuumError.missingMutationHandler(namespace: keySpace.namespace)
+        }
+        try await enqueue(kind: .mutate) { [self] epoch in
+            try await performMutation(kind: .mutate, epoch: epoch, action)
+        }
     }
 
     /// Forgets the current snapshot, pagination state, and writable local
@@ -457,7 +431,13 @@ public final class BucketPartition<Space: ContinuumKeySpace> {
     public func reset() async throws {
         try Task.checkCancellation()
         supersedeMutations()
-        try await enqueue(.reset)
+        try await enqueue(kind: .resetLocal) { [self] epoch in
+            try await performMutation(kind: .resetLocal, epoch: epoch) { mutation in
+                if case .reset = latestUpdate { compositionResetRevision &+= 1 }
+                clearPagination()
+                try await mutation.replace(with: nil)
+            }
+        }
     }
 }
 
@@ -465,18 +445,6 @@ public extension BucketPartition where Space.Input == SingletonInput {
     /// The current singleton value without starting a load.
     var value: Space.Value? {
         value(for: .shared)
-    }
-
-    /// Removes the singleton value and returns the bucket to an unloaded state.
-    ///
-    /// The value is immediately removed from observable memory and writable
-    /// local sources before a configured remote ``Remove`` confirms it.
-    ///
-    /// - Throws: An error raised by ``Remove`` or a writable ``LocalSource``.
-    ///   A failure restores the prior value in observable memory and attempts
-    ///   to restore local persistence.
-    func remove() async throws {
-        try await remove(.shared)
     }
 }
 
@@ -630,12 +598,6 @@ private extension BucketPartition {
         }
     }
 
-    private func enqueue(_ mutation: Mutation) async throws {
-        try await enqueue(kind: mutation.logKind) { [self] epoch in
-            try await perform(mutation, epoch: epoch)
-        }
-    }
-
     private func enqueue(
         kind: BucketMutationKind,
         operation: @escaping @MainActor (UInt) async throws -> Void
@@ -704,97 +666,63 @@ private extension BucketPartition {
         }
     }
 
-    private func perform(_ mutation: Mutation, epoch: UInt) async throws {
-        logSupersededWork(replacement: mutation.logKind.rawValue)
+    private func performMutation(
+        kind: BucketMutationKind,
+        epoch: UInt,
+        _ operation: (Mutation<Space>) async throws -> Void
+    ) async throws {
+        logSupersededWork(replacement: kind.rawValue)
         supersedeSourceWork()
         loadState = LoadState(isLoaded: loadState.isLoaded)
         let ownership = MutationOwnership(epoch: epoch, generation: generation)
         let previousSnapshot = snapshot
         let previousUpdate = latestUpdate
         let previousRemoteLoad = lastRemoteLoad
-        let previousPaginationCheckpoint = paginationCheckpoint
-        let resetsPagination: Bool
+        let previousPagination = kind == .resetLocal ? paginationCheckpoint : nil
+        var published = false
+
+        let mutation = Mutation(
+            keySpace: keySpace,
+            read: { [weak self] in self?.snapshot },
+            checkOwnership: { [weak self] in
+                guard let self else { throw CancellationError() }
+                try requireCurrent(ownership)
+            },
+            publish: { [weak self] snapshot in
+                guard let self else { throw CancellationError() }
+                try requireCurrent(ownership)
+                published = true
+                let normalized = snapshot.map(keySpace.normalized)
+                publishMutation(normalized)
+                try await persistence.persist(normalized)
+                try requireCurrent(ownership)
+            },
+            remoteStarted: { [logIdentity] in
+                continuumDebug(.remoteMutationStarted(logIdentity, kind: kind))
+            }
+        )
 
         do {
-            let updated: Space.Snapshot?
-
-            switch mutation {
-            case .store(let submittedValue):
-                updated = keySpace.normalized(
-                    keySpace.storing(
-                        submittedValue,
-                        in: previousSnapshot
-                    )
-                )
-                resetsPagination = false
-            case .remove(let input):
-                updated = keySpace.removing(input, from: previousSnapshot)
-                    .map(keySpace.normalized)
-                resetsPagination = false
-            case .reset:
-                updated = nil
-                resetsPagination = true
-            }
-
-            if resetsPagination, case .reset = latestUpdate { compositionResetRevision &+= 1 }
-            publishMutation(updated)
-            if resetsPagination {
-                clearPagination()
-            }
-            try await persistence.persist(updated)
+            try await operation(mutation)
+            try mutation.finish()
             try requireCurrent(ownership)
-
-            switch mutation {
-            case .store(let submittedValue):
-                guard let store = remoteSource?.store else { break }
-
-                continuumDebug(
-                    .remoteMutationStarted(
-                        logIdentity,
-                        kind: .store
-                    )
-                )
-                let authoritativeValue = try await store.operation(submittedValue)
-                try requireCurrent(ownership)
-
-                let submittedInput = keySpace.input(for: submittedValue)
-                let authoritativeInput = keySpace.input(for: authoritativeValue)
-                let baseSnapshot = if submittedInput == authoritativeInput {
-                    updated
-                } else {
-                    keySpace.removing(submittedInput, from: updated)
-                }
-                let reconciled = keySpace.normalized(
-                    keySpace.storing(authoritativeValue, in: baseSnapshot)
-                )
-
-                publishMutation(reconciled)
-                try await persistence.persist(reconciled)
-                try requireCurrent(ownership)
-            case .remove(let input):
-                guard let remove = remoteSource?.remove else { break }
-
-                continuumDebug(
-                    .remoteMutationStarted(
-                        logIdentity,
-                        kind: .remove
-                    )
-                )
-                try await remove.operation(input)
-                try requireCurrent(ownership)
-            case .reset:
-                break
-            }
         } catch {
-            await rollback(
-                to: previousSnapshot,
-                previousUpdate: previousUpdate,
-                after: error,
-                ownership: ownership,
-                lastRemoteLoad: previousRemoteLoad,
-                restoring: resetsPagination ? previousPaginationCheckpoint : nil
-            )
-            throw error
+            mutation.invalidate()
+            guard ownsState(ownership) else { throw CancellationError() }
+            let failure: any Error = Task.isCancelled ? CancellationError() : error
+            if published || previousPagination != nil {
+                await rollback(
+                    to: previousSnapshot,
+                    previousUpdate: previousUpdate,
+                    after: failure,
+                    ownership: ownership,
+                    lastRemoteLoad: previousRemoteLoad,
+                    restoring: previousPagination
+                )
+            } else if !(failure is CancellationError) {
+                setOperationError(failure)
+            }
+            throw failure
         }
     }
 

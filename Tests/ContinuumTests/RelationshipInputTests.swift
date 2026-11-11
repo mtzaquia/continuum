@@ -16,7 +16,7 @@ struct RelationshipInputTests {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
             RemoteSource {
                 Load { [Author]() }
-                LoadEntry { id in
+                Load { id in
                     await calls.record(id)
                     return Author(id: id, name: "author-\(id)")
                 }
@@ -83,7 +83,7 @@ struct RelationshipInputTests {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
             RemoteSource {
                 Load { [Author]() }
-                LoadEntry { id in
+                Load { id in
                     if await fail.enabled { throw LookupError.failed }
                     return Author(id: id, name: "remote")
                 }
@@ -93,11 +93,11 @@ struct RelationshipInputTests {
             Input { [Post(id: 1, authorID: 7)] }.resolving(\.authorID, from: authors)
         } transform: { posts, authors in Pair(posts: posts, authors: authors.mapValues(\.name)) }
         await until { value(composition.latest)?.authors[7] == "remote" }
-        try await authors.store(Author(id: 7, name: "stored"))
+        try await authors.put(Author(id: 7, name: "stored"))
         await until { value(composition.latest)?.authors[7] == "stored" }
-        try await authors.remove(7)
+        try await authors.delete(7)
         await until { value(composition.latest)?.authors[7] == "stored" }
-        try await authors.store(Author(id: 7, name: "recovered"))
+        try await authors.put(Author(id: 7, name: "recovered"))
         await until { value(composition.latest)?.authors[7] == "recovered" }
         try await authors.reset()
         await until { isReset(composition.latest) }
@@ -114,7 +114,7 @@ struct RelationshipInputTests {
         let groups = Bucket(IndexedKey<Int, [String]>("groups", indexedBy: { Int($0[0])! })) {
             RemoteSource {
                 Load { [[String]]() }
-                LoadEntry { (id: Int) in ["\(id)", "extra"] }
+                Load { (id: Int) in ["\(id)", "extra"] }
             }
         }
         let composition = Composition {
@@ -239,11 +239,11 @@ struct RelationshipInputTests {
             Input(root) { _ in }
                 .resolving(\.authorID) { id, policy in try await gate.resolve(id, policy) }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
-        try await root.store([Post(id: 1, authorID: 1)])
+        try await root.put([Post(id: 1, authorID: 1)])
         await gate.waitForCalls(1)
         gate.finish(id: 1, value: "one")
         await until { value(composition.latest) != nil }
-        try await root.store([Post(id: 2, authorID: 2)])
+        try await root.put([Post(id: 2, authorID: 2)])
         await gate.waitForCalls(2)
         try await root.reset()
         await until { isReset(composition.latest) }
@@ -306,7 +306,7 @@ struct RelationshipInputTests {
             RemoteSource { throw LookupError.failed }
         }
         let snapshot = [Post(id: 1, authorID: 1)]
-        try await posts.store(snapshot)
+        try await posts.put(snapshot)
         let composition = Composition {
             Input(posts).resolving(\.authorID) { _, _ in "one" }
         } transform: { posts, authors in Pair(posts: posts, authors: authors) }
@@ -324,7 +324,7 @@ struct RelationshipInputTests {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
             RemoteSource {
                 Load { [Author]() }
-                LoadEntry { id in Author(id: id, name: "one") }
+                Load { id in Author(id: id, name: "one") }
             }
         }
         let child = Composition {
@@ -335,7 +335,7 @@ struct RelationshipInputTests {
         var iterator = parent.makeAsyncIterator()
         _ = await iterator.next()
         try await authors.reset()
-        try await authors.store(Author(id: 1, name: "two"))
+        try await authors.put(Author(id: 1, name: "two"))
         var sawReset = false
         while let update = await iterator.next() {
             if isReset(update) { sawReset = true }
@@ -350,13 +350,13 @@ struct RelationshipInputTests {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
             RemoteSource {
                 Load { [Author]() }
-                LoadEntry { id in
+                Load { id in
                     await calls.record(id)
                     return Author(id: id, name: "remote")
                 }
             }
         }
-        try await authors.store(Author(id: 1, name: "local"))
+        try await authors.put(Author(id: 1, name: "local"))
         let source = Source<[Post]>()
         let composition = Composition {
             Input(source) { received in
@@ -385,7 +385,7 @@ struct RelationshipInputTests {
         let authors = Bucket(IndexedKey<Int, Author>("authors")) {
             RemoteSource {
                 Load { [Author]() }
-                LoadEntry { id in Author(id: id, name: try await gate.resolve(id, .cached)) }
+                Load { id in Author(id: id, name: try await gate.resolve(id, .cached)) }
             }
         }
         let composition = Composition {
@@ -401,8 +401,8 @@ struct RelationshipInputTests {
         gate.finish(id: 2, value: "two")
         await gate.waitForReturns(2)
         #expect(isReset(composition.latest))
-        try await authors.store(Author(id: 1, name: "recovered"))
-        try await authors.store(Author(id: 2, name: "two"))
+        try await authors.put(Author(id: 1, name: "recovered"))
+        try await authors.put(Author(id: 2, name: "two"))
         await until { value(composition.latest)?.authors == [1: "recovered", 2: "two"] }
     }
 

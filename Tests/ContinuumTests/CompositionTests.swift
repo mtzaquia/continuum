@@ -10,8 +10,8 @@ struct CompositionTests {
         let favorites = Bucket(IndexedKey<Int, Favorite>("composition.favorites", indexedBy: \.id))
         let partitioned = Bucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in }
         let preferences = Preferences()
-        try await user.store("Sam")
-        try await partitioned["selected"].store(42)
+        try await user.put("Sam")
+        try await partitioned["selected"].put(42)
         let composition = Composition {
             Input(user)
             Input(favorites).optional()
@@ -29,7 +29,7 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == "Sam:0:42:en")
         preferences.language = "nl"
         #expect(success(await iterator.next()) == "Sam:0:42:nl")
-        try await favorites.store(Favorite(id: 1))
+        try await favorites.put(Favorite(id: 1))
         #expect(success(await iterator.next()) == "Sam:1:42:nl")
         try await favorites.reset()
         #expect(success(await iterator.next()) == "Sam:0:42:nl")
@@ -280,7 +280,7 @@ struct CompositionTests {
         let composition = Composition {
             Input(source) { policy in
                 if case .remote = policy { calls.append("snapshot") }
-                try await source.store(7)
+                try await source.put(7)
             }
             Input { preferences.language } load: { policy in
                 if case .remote = policy { calls.append("value") }
@@ -367,7 +367,7 @@ struct CompositionTests {
         #expect(isFailure(composition.latest))
         var iterator = composition.makeAsyncIterator()
         #expect(isFailure(await iterator.next()))
-        try await bucket.store(5)
+        try await bucket.put(5)
         #expect(success(await iterator.next()) == 6)
     }
 
@@ -378,8 +378,8 @@ struct CompositionTests {
         }
         let partition = bucket["selected"]
         let sibling = Bucket(Key<Int>("composition.sibling"))
-        try await partition.store(10)
-        try await sibling.store(1)
+        try await partition.put(10)
+        try await sibling.put(1)
         let composition = Composition {
             Input(partition)
             Input(sibling) { _ in }
@@ -395,7 +395,7 @@ struct CompositionTests {
         #expect(success(composition.latest) == 11)
         #expect(success(try await firstUpdate(composition)) == 11)
 
-        try await sibling.store(2)
+        try await sibling.put(2)
         // Pending recomputations can repeat the retained success.
         while let update = await current.next() {
             guard let value = success(update) else {
@@ -516,9 +516,9 @@ struct CompositionTests {
         #expect(success(composition.latest) == -1)
         var iterator = composition.makeAsyncIterator()
         #expect(success(await iterator.next()) == -1)
-        try await bucket.store(Optional<Int>.none)
+        try await bucket.put(Optional<Int>.none)
         #expect(success(await iterator.next()) == -1)
-        try await bucket.store(Optional.some(7))
+        try await bucket.put(Optional.some(7))
         #expect(success(await iterator.next()) == 7)
         try await bucket.reset()
         #expect(success(await iterator.next()) == -1)
@@ -705,10 +705,10 @@ struct CompositionTests {
         #expect(isReset(partition.latest))
         let (changes, changed) = AsyncStream<Void>.makeStream()
         withObservationTracking { _ = bucket.latest } onChange: { changed.yield(()) }
-        try await bucket.store(3)
+        try await bucket.put(3)
         var observed = changes.makeAsyncIterator()
         #expect(await observed.next() != nil)
-        try await partition.store(4)
+        try await partition.put(4)
         let composition = Composition { Input(bucket) } transform: { $0 + 2 }
         #expect(success(bucket.latest) == 3)
         #expect(success(partition.latest) == 4)
@@ -721,7 +721,7 @@ struct CompositionTests {
     func builtInSourceObservation() async throws {
         let bucket = Bucket(Key<Int>("uniform.observed-bucket"))
         #expect(try await observesSourceChange(bucket) {
-            try await bucket.store(1)
+            try await bucket.put(1)
         })
 
         let partitions = Bucket(
@@ -730,13 +730,13 @@ struct CompositionTests {
         ) { _ in }
         let partition = partitions["one"]
         #expect(try await observesSourceChange(partition) {
-            try await partition.store(2)
+            try await partition.put(2)
         })
 
         let root = Bucket(Key<Int>("uniform.observed-composition"))
         let composition = Composition { Input(root) } transform: { $0 + 1 }
         #expect(try await observesSourceChange(composition) {
-            try await root.store(3)
+            try await root.put(3)
         })
     }
 
@@ -745,14 +745,14 @@ struct CompositionTests {
         let bucket = Bucket(Key<Int>("uniform.reset"))
         let first = Task { try await firstUpdate(bucket) }
         for _ in 0..<10 { await Task.yield() }
-        try await bucket.store(1)
+        try await bucket.put(1)
         #expect(success(try await first.value) == 1)
         var iterator = bucket.makeAsyncIterator()
         #expect(success(await iterator.next()) == 1)
         try await bucket.reset()
         #expect(isReset(await iterator.next()))
         #expect(isReset(bucket.latest))
-        try await bucket.store(2)
+        try await bucket.put(2)
         #expect(success(await iterator.next()) == 2)
     }
 
@@ -761,7 +761,7 @@ struct CompositionTests {
         let bucket = Bucket(Key<Int>("uniform.failure")) {
             RemoteSource { throw TestError.failed }
         }
-        try await bucket.store(1)
+        try await bucket.put(1)
         var iterator = bucket.makeAsyncIterator()
         #expect(success(await iterator.next()) == 1)
         await #expect(throws: TestError.self) { try await bucket.load(using: .remote) }
@@ -771,7 +771,7 @@ struct CompositionTests {
         #expect(try await bucket.load(using: .cached) == 1)
         #expect(bucket.error is TestError)
         #expect(success(try await firstUpdate(bucket)) == 1)
-        try await bucket.store(2)
+        try await bucket.put(2)
         #expect(success(await iterator.next()) == 2)
         #expect(success(bucket.latest) == 2)
         #expect(bucket.error == nil)
@@ -780,7 +780,7 @@ struct CompositionTests {
     @Test("Direct bucket subscribers cancel independently")
     func directSubscribers() async throws {
         let bucket = Bucket(Key<Int>("uniform.subscribers"))
-        try await bucket.store(1)
+        try await bucket.put(1)
         var other = bucket.makeAsyncIterator()
         #expect(success(await other.next()) == 1)
         let (started, start) = AsyncStream<Void>.makeStream()
@@ -794,14 +794,14 @@ struct CompositionTests {
         _ = await starts.next()
         consumer.cancel()
         #expect(await consumer.value == nil)
-        try await bucket.store(2)
+        try await bucket.put(2)
         #expect(success(await other.next()) == 2)
     }
 
     @Test("Releasing a direct iterator releases its retained bucket")
     func directIteratorLifetime() async throws {
         var bucket: ValueBucket<Int>? = Bucket(Key<Int>("uniform.lifetime"))
-        try await bucket?.store(1)
+        try await bucket?.put(1)
         weak var weakBucket = bucket
         var iterator = bucket?.makeAsyncIterator()
         #expect(success(await iterator?.next()) == 1)
@@ -840,7 +840,7 @@ struct CompositionTests {
     @Test("A new operation error updates the shared failure while an input is blocked")
     func failureMappingAfterOperationError() async throws {
         let bucket = Bucket(IndexedKey<Int, Favorite>("composition.shared-error", indexedBy: \.id))
-        try await bucket.store(Favorite(id: 1))
+        try await bucket.put(Favorite(id: 1))
         let required = Source<Int>(.result(.failure(NumberedError(number: 1))))
         let composition = Composition {
             Input(required)
@@ -884,7 +884,7 @@ struct CompositionTests {
     @Test("An externally failed entry load updates observable composition error without transforming")
     func observesOperationErrors() async throws {
         let bucket = Bucket(IndexedKey<Int, Favorite>("composition.entry-error", indexedBy: \.id))
-        try await bucket.store(Favorite(id: 1))
+        try await bucket.put(Favorite(id: 1))
         var transforms = 0
         let composition = Composition { Input(bucket) } transform: { favorites in
             transforms += 1

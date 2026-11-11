@@ -20,23 +20,19 @@
 //  SOFTWARE.
 //
 
-/// The initial loading operation in an advanced ``RemoteSource``.
-///
-/// Use this member when the remote source also declares ``LoadEntry``, ``Store``, or ``Remove``.
-/// Return the complete snapshot for a non-paginated source. To paginate, return
-/// ``Page`` and follow this member with ``NextPage``. A read-only,
-/// non-paginated source can keep the shorter
-/// `RemoteSource { ... }` form.
-nonisolated public struct Load<Snapshot: Sendable>: Sendable {
-    let operation: @Sendable () async throws -> Snapshot
+/// Loads a complete remote snapshot or one indexed entry.
+nonisolated public struct Load<Input: Sendable, Output: Sendable>: Sendable {
+    let operation: @Sendable (Input) async throws -> Output
 
-    /// Creates an initial remote loading operation.
-    ///
-    /// - Parameter operation: An operation returning the initial payload.
-    public init(
-        _ operation:
-            @escaping @Sendable () async throws -> Snapshot
-    ) {
+    /// Loads a complete snapshot or the initial page of a remote collection.
+    public init(_ operation: @escaping @Sendable () async throws -> Output) where Input == Void {
+        self.operation = { _ in try await operation() }
+    }
+
+    /// Loads an entry by its index. The returned entry must have that index.
+    /// Existing entries are replaced in place. Missing entries are returned
+    /// without insertion into the collection.
+    public init(_ operation: @escaping @Sendable (Input) async throws -> Output) {
         self.operation = operation
     }
 }

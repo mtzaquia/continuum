@@ -57,13 +57,14 @@ a failed reset restores the original interval with the previous snapshot.
 
 ## Load one indexed entry
 
-Add `LoadEntry` after `Load` (or `NextPage` for a paginated source):
+Add a `Load` closure that receives an ID after the snapshot `Load` or, for a
+paginated source, after `NextPage`.
 
 ```swift
 let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
   RemoteSource {
     Load { try await client.authors() }
-    LoadEntry { id in try await client.author(id: id) }
+    Load { id in try await client.author(id: id) }
   }
 }
 

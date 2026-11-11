@@ -59,7 +59,7 @@ struct LoadEntryTests {
         let invalid = Bucket(IndexedKey<Int, Entry>("invalid")) {
             RemoteSource {
                 Load { [Entry(1, "old")] }
-                LoadEntry { (_: Int) in Entry(2, "wrong") }
+                Load { (_: Int) in Entry(2, "wrong") }
             }
         }
         try await invalid.load()
@@ -142,7 +142,7 @@ struct LoadEntryTests {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
             RemoteSource {
                 Load { [Entry(1, "old")] }
-                LoadEntry { try await gate.fetch($0) }
+                Load { try await gate.fetch($0) }
             }
         }
         try await bucket.load()
@@ -171,11 +171,11 @@ struct LoadEntryTests {
         } transform: { _, entries in entries }
         await composition.load()
         #expect(value(composition.latest)?[1] == Entry(1, "new"))
-        try await bucket.store(Entry(1, "edited"))
+        try await bucket.put(Entry(1, "edited"))
         await until { value(composition.latest)?[1] == Entry(1, "edited") }
         var iterator = composition.makeAsyncIterator()
         _ = await iterator.next()
-        try await bucket.remove(1)
+        try await bucket.delete(1)
         #expect(value(try #require(await iterator.next()))?[1] == Entry(1, "edited"))
         await composition.load(using: .cached)
         #expect(value(composition.latest)?[1] == Entry(1, "new"))
@@ -194,9 +194,9 @@ struct LoadEntryTests {
         await composition.load(using: .remote)
         var iterator = composition.makeAsyncIterator()
         if case .result(.failure)? = await iterator.next() {} else { Issue.record("Expected failure") }
-        try await bucket.store(Entry(2, "Bob"))
+        try await bucket.put(Entry(2, "Bob"))
         if case .result(.failure)? = await iterator.next() {} else { Issue.record("Bob must not clear Alice's error") }
-        try await bucket.store(Entry(1, "Alice"))
+        try await bucket.put(Entry(1, "Alice"))
         if case .result(.failure)? = await iterator.next() {} else { Issue.record("Stores must not clear load errors") }
         await composition.load(using: .cached)
         #expect(value(composition.latest)?[1] == Entry(1, "Alice"))
@@ -211,7 +211,7 @@ struct LoadEntryTests {
         await until { gate.calls.count == 1 }
         switch operation {
         case 0: try await bucket.reset()
-        case 1: try await bucket.remove(1)
+        case 1: try await bucket.delete(1)
         default: try await bucket.load(using: .remote)
         }
         let expected = bucket.values
@@ -220,15 +220,13 @@ struct LoadEntryTests {
         #expect(bucket.values == expected)
     }
 
-    @Test("Entry refresh preserves pagination and combines with Store and Remove capabilities")
+    @Test("Entry refresh preserves pagination alongside the snapshot Load")
     func pagination() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("paged")) {
             RemoteSource {
                 Load { Page(value: [Entry(1, "old")], next: 2) }
                 NextPage { cursor in Page(value: [Entry(cursor, "page")], next: Optional<Int>.none) }
-                LoadEntry { id in Entry(id, "new") }
-                Store { (entry: Entry) in entry }
-                Remove { (_: Int) in }
+                Load { id in Entry(id, "new") }
             }
         }
         try await bucket.load()
@@ -244,7 +242,7 @@ struct LoadEntryTests {
         let bucket = Bucket(IndexedKey<Int, Entry>("partitioned"), partitionedBy: String.self) { query in
             RemoteSource {
                 Load { [Entry(1, query)] }
-                LoadEntry { id in Entry(id, query) }
+                Load { id in Entry(id, query) }
             }
         }
         let selected = bucket["query"]
@@ -268,7 +266,7 @@ struct LoadEntryTests {
         await composition.load()
         #expect(value(composition.latest) == [1: Entry(1, "old"), 3: Entry(3, "new")])
         #expect(bucket[3] == nil)
-        try await bucket.store(Entry(1, "edited"))
+        try await bucket.put(Entry(1, "edited"))
         await until { value(composition.latest)?[1] == Entry(1, "edited") }
         #expect(value(composition.latest)?[3] == Entry(3, "new"))
         try await bucket.reset()
@@ -280,10 +278,10 @@ struct LoadEntryTests {
         await until { isReset(composition.latest) }
     }
 
-    @Test("Relationships can use cached entries without LoadEntry but fail when a fetch needs it")
+    @Test("Relationships can use cached entries and require an entry loader for a fetch")
     func relationshipWithoutLoader() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("cached-only"))
-        try await bucket.store(Entry(1, "cached"))
+        try await bucket.put(Entry(1, "cached"))
         let composition = Composition {
             Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
         } transform: { _, entries in entries }
@@ -306,7 +304,7 @@ struct LoadEntryTests {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
             RemoteSource {
                 Load { [Entry(1, "old")] }
-                LoadEntry { id in Entry(id, "new") }
+                Load { id in Entry(id, "new") }
             }
         }
         try await bucket.load()
@@ -332,7 +330,7 @@ struct LoadEntryTests {
                 NextPage { cursor in
                     Page(value: [try await gate.fetch(cursor)], next: Optional<Int>.none)
                 }
-                LoadEntry { id in Entry(id, "new") }
+                Load { id in Entry(id, "new") }
             }
         }
         try await bucket.load()
@@ -413,7 +411,7 @@ private func makeBucket(_ service: Service) -> IndexedBucket<Int, Entry> {
         LocalSource { Optional<[Entry]>.none } persist: { try await service.persist($0) }
         RemoteSource {
             Load { [Entry(2, "old"), Entry(1, "old")] }
-            LoadEntry { try await service.fetch($0) }
+            Load { try await service.fetch($0) }
         }
     }
 }
@@ -432,7 +430,7 @@ private func gatedBucket(_ gate: Gate) -> IndexedBucket<Int, Entry> {
     Bucket(IndexedKey<Int, Entry>("gated")) {
         RemoteSource {
             Load { [Entry(1, "old"), Entry(2, "old")] }
-            LoadEntry { try await gate.fetch($0) }
+            Load { try await gate.fetch($0) }
         }
     }
 }

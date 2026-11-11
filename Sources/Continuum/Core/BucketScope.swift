@@ -53,10 +53,11 @@ nonisolated public enum PartitionedScope<
 public typealias PartitionedBucket<
     Partition: Hashable & Sendable,
     Space: ContinuumKeySpace
-> = Bucket<Space, PartitionedScope<Partition>>
+> = Bucket<Space, PartitionedScope<Partition>, MutationAction<Space>>
 
 /// An unpartitioned bucket whose snapshot is one value.
-public typealias ValueBucket<Value: Sendable> = Bucket<Key<Value>, UnpartitionedBucketScope>
+public typealias ValueBucket<Value: Sendable> =
+    Bucket<Key<Value>, UnpartitionedBucketScope, MutationAction<Key<Value>>>
 
 /// A bucket whose partitions each own one value.
 public typealias PartitionedValueBucket<
@@ -73,3 +74,36 @@ public typealias PartitionedIdentifiedBucket<
     Partition: Hashable & Sendable,
     Value: Identifiable & Sendable
 > = PartitionedIndexedBucket<Partition, Value.ID, Value> where Value.ID: Hashable & Sendable
+
+/// An unpartitioned bucket with a typed mutation operation.
+public typealias MutableBucket<Space: ContinuumKeySpace, Operation: Sendable> =
+    Bucket<Space, UnpartitionedBucketScope, Operation>
+
+/// A bucket whose selected partitions accept a typed mutation operation.
+public typealias PartitionedMutableBucket<
+    Partition: Hashable & Sendable,
+    Space: ContinuumKeySpace,
+    Operation: Sendable
+> = Bucket<Space, PartitionedScope<Partition>, Operation>
+
+/// An unpartitioned single-value bucket with a typed mutation operation.
+public typealias MutableValueBucket<Value: Sendable, Operation: Sendable> =
+    MutableBucket<Key<Value>, Operation>
+
+/// A bucket whose partitions each own one value and accept a typed mutation operation.
+public typealias PartitionedMutableValueBucket<
+    Partition: Hashable & Sendable,
+    Value: Sendable,
+    Operation: Sendable
+> = PartitionedMutableBucket<Partition, Key<Value>, Operation>
+
+/// An unpartitioned collection bucket with a typed mutation operation and `Value.ID` as its index.
+public typealias MutableIdentifiedBucket<Value: Identifiable & Sendable, Operation: Sendable> =
+    MutableIndexedBucket<Value.ID, Value, Operation> where Value.ID: Hashable & Sendable
+
+/// A bucket whose partitions each own an identified collection and accept a typed mutation operation.
+public typealias PartitionedMutableIdentifiedBucket<
+    Partition: Hashable & Sendable,
+    Value: Identifiable & Sendable,
+    Operation: Sendable
+> = PartitionedMutableIndexedBucket<Partition, Value.ID, Value, Operation> where Value.ID: Hashable & Sendable

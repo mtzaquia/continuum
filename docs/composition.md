@@ -132,7 +132,7 @@ Pair `.resolving` with an array input when its entries identify required data:
 let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
   RemoteSource {
     Load { try await client.authors() }
-    LoadEntry { id in try await client.author(id: id) }
+    Load { id in try await client.author(id: id) }
   }
 }
 
@@ -161,7 +161,7 @@ entry error separately. Collection edits alone do not clear relationship errors.
 
 `from:` also accepts an explicitly selected indexed partition. Partition keys
 select a collection (such as a search query); foreign keys select its entries.
-A cached entry needs no loader. Fetching without `LoadEntry` produces
+A cached entry needs no loader. Fetching without an entry `Load` produces
 `ContinuumError.missingEntrySource`, which fails the required relationship.
 
 ### Use a one-shot lookup

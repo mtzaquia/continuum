@@ -56,6 +56,32 @@ struct KeyTests {
         _ = try await repository.itemsByRegion["eu"].load()
         #expect(repository.itemsByRegion["eu"]["eu"]?.code == "eu")
     }
+
+    @Test("Typed bucket aliases preserve operations in repository requirements and partitions")
+    func mutableRepositoryAliases() async throws {
+        let repository: any MutableBucketRepository = MutableAliasRepository()
+        let indexed: PartitionedMutableIndexedBucket<String, Int, Card, CardOperation> =
+            repository.cardsByRegion
+        let cards: MutableBucket<IndexedKey<Int, Card>, CardOperation> = repository.cards
+
+        try await cards.load()
+        try await indexed["eu"].load()
+        try await indexed["us"].load()
+        try await repository.option.load()
+        try await repository.optionsByRegion["eu"].load()
+
+        try await cards.mutate(.clear)
+        try await indexed["eu"].mutate(.clear)
+        try await repository.option.mutate(.set(true))
+        try await repository.optionsByRegion["eu"].mutate(.set(true))
+
+        #expect(cards.isLoaded)
+        #expect(cards.isEmpty)
+        #expect(indexed["eu"].isEmpty)
+        #expect(indexed["us"][1]?.code == "us")
+        #expect(repository.option.value == true)
+        #expect(repository.optionsByRegion["eu"].value == true)
+    }
 }
 
 private nonisolated struct Card: Identifiable, Sendable {
@@ -102,5 +128,48 @@ private struct AliasRepository: BucketRepository {
         IndexedKey("items-by-region", indexedBy: { $0.code }), partitionedBy: String.self
     ) { region in
         RemoteSource { [Item(code: region)] }
+    }
+}
+
+private nonisolated enum CardOperation: Sendable { case clear }
+private nonisolated enum OptionOperation: Sendable { case set(Bool) }
+
+@MainActor
+private protocol MutableBucketRepository {
+    var cards: MutableIndexedBucket<Int, Card, CardOperation> { get }
+    var cardsByRegion: PartitionedMutableBucket<String, IndexedKey<Int, Card>, CardOperation> { get }
+    var option: MutableValueBucket<Bool, OptionOperation> { get }
+    var optionsByRegion: PartitionedMutableValueBucket<String, Bool, OptionOperation> { get }
+}
+
+@MainActor
+private struct MutableAliasRepository: MutableBucketRepository {
+    let cards: MutableIdentifiedBucket<Card, CardOperation> = Bucket(IndexedKey("cards")) {
+        RemoteSource { [Card(id: 1, code: "standard")] }
+        Mutate { (_: CardOperation, mutation) in try await mutation.update { _ in [] } }
+    }
+    let cardsByRegion: PartitionedMutableIdentifiedBucket<String, Card, CardOperation> = Bucket(
+        IndexedKey("cards-by-region"), partitionedBy: String.self
+    ) { region in
+        RemoteSource { [Card(id: 1, code: region)] }
+        Mutate { (_: CardOperation, mutation) in try await mutation.update { _ in [] } }
+    }
+    let option: MutableValueBucket<Bool, OptionOperation> = Bucket(Key("option")) {
+        RemoteSource { false }
+        Mutate { (operation: OptionOperation, mutation) in
+            switch operation {
+            case let .set(value): try await mutation.update { _ in value }
+            }
+        }
+    }
+    let optionsByRegion: PartitionedMutableValueBucket<String, Bool, OptionOperation> = Bucket(
+        Key("options-by-region"), partitionedBy: String.self
+    ) { _ in
+        RemoteSource { false }
+        Mutate { (operation: OptionOperation, mutation) in
+            switch operation {
+            case let .set(value): try await mutation.update { _ in value }
+            }
+        }
     }
 }

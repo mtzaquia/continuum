@@ -40,9 +40,8 @@ nonisolated struct RemotePageContinuation<
 /// A bucket accepts at most one remote source. Cached loads reach it after all
 /// local sources miss, or when configured snapshot freshness requires remote
 /// validation. Cached-then-remote loads require and always reach it,
-/// while remote loads use it directly and supersede active source work. A
-/// source can progressively disclose pagination or mutations by declaring
-/// ``Load``, ``NextPage``, ``LoadEntry``, ``Store``, and ``Remove`` members.
+/// while remote loads use it directly and supersede active source work. An
+/// advanced source can declare ``NextPage`` and a ``Load`` taking an entry ID.
 /// Successful remote snapshots write through to every writable ``LocalSource``
 /// before entering observable memory.
 nonisolated public struct RemoteSource<
@@ -50,9 +49,7 @@ nonisolated public struct RemoteSource<
 >: Sendable {
     let operation: @Sendable () async throws -> RemoteSnapshot<Space>
     let isPaginated: Bool
-    let loadEntry: LoadEntry<Space.Input, Space.Value>?
-    let store: Store<Space.Value>?
-    let remove: Remove<Space.Input>?
+    let loadEntry: Load<Space.Input, Space.Value>?
 
     /// Creates a remote source.
     ///
@@ -66,19 +63,16 @@ nonisolated public struct RemoteSource<
 
     /// Creates an advanced remote source.
     ///
-    /// Declare one ``Load``, followed by optional ``NextPage``, ``LoadEntry``
-    /// (indexed sources only), ``Store``, and ``Remove`` capabilities:
+    /// Declare a snapshot ``Load``, optional ``NextPage``, and an optional
+    /// indexed-entry ``Load`` that takes an ID:
     ///
     /// ```swift
     /// RemoteSource {
     ///     Load {
     ///         try await client.posts()
     ///     }
-    ///     Store { post in
-    ///         try await client.store(post)
-    ///     }
-    ///     Remove { id in
-    ///         try await client.removePost(id: id)
+    ///     Load { id in
+    ///         try await client.post(id: id)
     ///     }
     /// }
     /// ```
@@ -92,32 +86,26 @@ nonisolated public struct RemoteSource<
     }
 
     init(
-        load: Load<Space.Snapshot>,
-        loadEntry: LoadEntry<Space.Input, Space.Value>? = nil,
-        store: Store<Space.Value>? = nil,
-        remove: Remove<Space.Input>? = nil
+        load: Load<Void, Space.Snapshot>,
+        loadEntry: Load<Space.Input, Space.Value>? = nil
     ) {
         operation = {
             RemoteSnapshot(
-                snapshot: try await load.operation(),
+                snapshot: try await load.operation(()),
                 nextPage: nil
             )
         }
         isPaginated = false
         self.loadEntry = loadEntry
-        self.store = store
-        self.remove = remove
     }
 
     init<Cursor: Sendable>(
-        load: Load<Page<Space.Snapshot, Cursor>>,
+        load: Load<Void, Page<Space.Snapshot, Cursor>>,
         nextPage: NextPage<Space.Snapshot, Cursor>,
-        loadEntry: LoadEntry<Space.Input, Space.Value>? = nil,
-        store: Store<Space.Value>? = nil,
-        remove: Remove<Space.Input>? = nil
+        loadEntry: Load<Space.Input, Space.Value>? = nil
     ) {
         operation = {
-            let page = try await load.operation()
+            let page = try await load.operation(())
             return remoteSnapshot(
                 from: page,
                 nextPage: nextPage
@@ -125,8 +113,6 @@ nonisolated public struct RemoteSource<
         }
         isPaginated = true
         self.loadEntry = loadEntry
-        self.store = store
-        self.remove = remove
     }
 }
 

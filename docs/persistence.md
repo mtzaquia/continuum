@@ -22,11 +22,12 @@ or schema migration layer.
 | Operation | Publication and persistence |
 | --- | --- |
 | Remote load or next page | Persist the complete normalized snapshot, then publish it. |
-| `store` or `remove` | Publish optimistically, persist locally, then run any configured remote mutation. |
-| Authoritative `Store` response | Reconcile the snapshot, publish it, then persist it. |
+| Snapshot edit in `mutate` | Publish optimistically, persist locally, then run the paired endpoint. |
+| Authoritative mutation response | Apply the returned entry or snapshot, publish it, then persist the complete snapshot. |
 | `reset` | Clear memory and pagination, then persist `nil`. |
 
-Pages persist the full accumulated snapshot. Coalesced loads share persistence
+A remote-only mutation and an edit skipped for unavailable data write no
+snapshot. Pages persist the full accumulated snapshot. Coalesced loads share persistence
 work. Read-only local sources omit `persist:` and receive no writes.
 
 ## Use several writable destinations

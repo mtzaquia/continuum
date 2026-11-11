@@ -10,7 +10,7 @@ struct OperationOrderingTests {
             LocalSource { await disk.value } persist: { await disk.write($0) }
             RemoteSource { 1 }
         }
-        try await bucket.store(9)
+        try await bucket.put(9)
         let load = Task { try await bucket.load(using: .remote) }
         await disk.writeGate.started()
         let reset = Task { try await bucket.reset() }
@@ -31,7 +31,7 @@ struct OperationOrderingTests {
             LocalSource { await disk.value } persist: { await disk.write($0) }
             RemoteSource { 7 }
         }
-        try await bucket.store(9)
+        try await bucket.put(9)
         let reset = Task { try await bucket.reset() }
         await disk.writeGate.started()
         let cached = Task { try await bucket.load() }
@@ -47,12 +47,13 @@ struct OperationOrderingTests {
         let disk = OrderedDisk()
         let bucket = Bucket(Key<Int>("ordering.store-refresh")) {
             LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource {
-                Load { 9 }
-                Store { _ in await gate.wait() }
+            RemoteSource { 9 }
+        }
+        let mutation = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.replace(with: 4) { await gate.wait() }
             }
         }
-        let mutation = Task { try await bucket.store(4) }
         await gate.started()
         try await bucket.load(using: .remote)
         await gate.finish(2)
@@ -68,17 +69,18 @@ struct OperationOrderingTests {
         let disk = OrderedDisk()
         let bucket = Bucket(Key<Int>("ordering.cancel")) {
             LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource {
-                Load { 9 }
-                Store { _ in
+            RemoteSource { 9 }
+        }
+        try await bucket.load()
+        let mutation = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.update { _ in 4 } remotely: {
                     _ = await gate.wait()
                     try Task.checkCancellation()
                     return 2
                 }
             }
         }
-        try await bucket.load()
-        let mutation = Task { try await bucket.store(4) }
         await gate.started()
         mutation.cancel()
         await gate.finish(0)
@@ -99,11 +101,14 @@ struct OperationOrderingTests {
                     await pageEntered.finish(())
                     return Page(values: [3], next: Optional<Int>.none)
                 }
-                Store { _ in await gate.wait() }
             }
         }
         try await bucket.load()
-        let mutation = Task { try await bucket.store(2) }
+        let mutation = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.update { $0 + [2] } remotely: { [1, await gate.wait()] }
+            }
+        }
         await gate.started()
         let page = Task { try await bucket.loadNext() }
         // Yield to the page caller while the store remains suspended.
@@ -122,19 +127,24 @@ struct OperationOrderingTests {
         let disk = OrderedDisk()
         let bucket = Bucket(Key<Int>("ordering.cancel-queued")) {
             LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource {
-                Load { 9 }
-                Store { value in
-                    if value == 4 { await gate.wait() }
+            RemoteSource { 9 }
+        }
+        try await bucket.load()
+        let first = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.update { _ in 4 } remotely: {
+                    await gate.wait()
                     try Task.checkCancellation()
-                    return value
+                    return 4
                 }
             }
         }
-        try await bucket.load()
-        let first = Task { try await bucket.store(4) }
         await gate.started()
-        let second = Task { try await bucket.store(5) }
+        let second = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.update { _ in 5 } remotely: { 5 }
+            }
+        }
         first.cancel()
         await gate.finish(())
         await #expect(throws: CancellationError.self) { try await first.value }
@@ -169,13 +179,12 @@ struct OperationOrderingTests {
     @Test("Cached-then-remote waits for a pending mutation")
     func refreshWaitsForMutation() async throws {
         let gate = OperationGate<Int>()
-        let bucket = Bucket(Key<Int>("ordering.cached-remote")) {
-            RemoteSource {
-                Load { 9 }
-                Store { _ in await gate.wait() }
+        let bucket = Bucket(Key<Int>("ordering.cached-remote")) { RemoteSource { 9 } }
+        let mutation = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.replace(with: 4) { await gate.wait() }
             }
         }
-        let mutation = Task { try await bucket.store(4) }
         await gate.started()
         let refresh = Task { try await bucket.load(using: .cachedThenRemote) }
         await Task.yield()
@@ -189,13 +198,12 @@ struct OperationOrderingTests {
     func retryClearsStreamFailure() async throws {
         let gate = OperationGate<Int>()
         enum Failure: Error { case expected }
-        let bucket = Bucket(Key<Int>("ordering.retry")) {
-            RemoteSource {
-                Load { await gate.wait() }
-                Store<Int> { _ in throw Failure.expected }
+        let bucket = Bucket(Key<Int>("ordering.retry")) { RemoteSource { await gate.wait() } }
+        await #expect(throws: Failure.self) {
+            try await bucket.mutate { mutation in
+                try await mutation.replace(with: 1) { throw Failure.expected }
             }
         }
-        await #expect(throws: Failure.self) { try await bucket.store(1) }
         let refresh = Task { try await bucket.load(using: .remote) }
         await gate.started()
         #expect(bucket.error == nil)

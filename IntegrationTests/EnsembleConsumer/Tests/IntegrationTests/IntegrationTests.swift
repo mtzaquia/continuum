@@ -23,7 +23,7 @@ struct IntegrationTests {
         data.connect()
         for _ in 0..<10 { await Task.yield() }
         #expect(data.phase.kind == .empty)
-        try await bucket.store(7)
+        try await bucket.mutate { try await $0.replace(with: 7) }
         if case .result(.success(7))? = await received.next() {} else {
             Issue.record("The initial snapshot must be the first update")
         }
@@ -64,7 +64,7 @@ struct IntegrationTests {
         let bucket = Bucket(Key<Int>("ensemble.required")) {
             RemoteSource { throw Failure.test }
         }
-        try await bucket.store(7)
+        try await bucket.mutate { try await $0.replace(with: 7) }
         let sibling = Source()
         sibling.update = .result(.success(1))
         let composition = Composition {
@@ -97,7 +97,7 @@ struct IntegrationTests {
         let names = Bucket(IndexedKey<Int, NamedEntry>("ensemble.names")) {
             RemoteSource {
                 Load { [NamedEntry]() }
-                LoadEntry { id in NamedEntry(id: id, name: try await service.name(id)) }
+                Load { id in NamedEntry(id: id, name: try await service.name(id)) }
             }
         }
         let child = Composition {

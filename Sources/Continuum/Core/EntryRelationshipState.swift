@@ -25,13 +25,13 @@ import Observation
 /// An entry's returned value belongs to the relationship, not to the collection.
 @MainActor
 @Observable
-final class EntryRelationshipState<ID: Hashable & Sendable, Value: Sendable> {
-    private let partition: BucketPartition<IndexedKey<ID, Value>>
+final class EntryRelationshipState<ID: Hashable & Sendable, Value: Sendable, Operation: Sendable> {
+    private let partition: BucketPartition<IndexedKey<ID, Value>, Operation>
     private let id: ID
     @ObservationIgnored private var lastObserved: (revision: UInt, value: Value)?
     private var returned: (revision: UInt, result: Result<Value, any Error>)?
 
-    init(partition: BucketPartition<IndexedKey<ID, Value>>, id: ID) {
+    init(partition: BucketPartition<IndexedKey<ID, Value>, Operation>, id: ID) {
         self.partition = partition
         self.id = id
     }

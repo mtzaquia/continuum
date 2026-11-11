@@ -49,23 +49,24 @@ import Observation
 @Observable
 public final class Bucket<
     Space: ContinuumKeySpace,
-    Scope: BucketScope
+    Scope: BucketScope,
+    Operation: Sendable
 > {
     /// The key that establishes this bucket's namespace and snapshot behavior.
     public let keySpace: Space
 
     @ObservationIgnored
-    private let unpartitioned: BucketPartition<Space>?
+    private let unpartitioned: BucketPartition<Space, Operation>?
 
     @ObservationIgnored
     private let staleAfter: Duration?
 
     @ObservationIgnored
     private let partitionConfiguration:
-        (@MainActor @Sendable (Scope.Partition) -> BucketConfiguration<Space>)?
+        (@MainActor @Sendable (Scope.Partition) -> BucketConfiguration<Space, Operation>)?
 
     @ObservationIgnored
-    private var partitionStorage: [Scope.Partition: BucketPartition<Space>] = [:]
+    private var partitionStorage: [Scope.Partition: BucketPartition<Space, Operation>] = [:]
 
     /// Creates an observable in-memory data bucket.
     ///
@@ -73,11 +74,9 @@ public final class Bucket<
     /// emits a runtime warning; use mutations to manage its in-memory state.
     ///
     /// - Parameter keySpace: The key whose atomic snapshot this bucket owns.
-    public init(_ keySpace: Space) where Scope == UnpartitionedBucketScope {
-        self.keySpace = keySpace
-        staleAfter = nil
-        unpartitioned = BucketPartition(keySpace)
-        partitionConfiguration = nil
+    public convenience init(_ keySpace: Space)
+    where Scope == UnpartitionedBucketScope, Operation == MutationAction<Space> {
+        self.init(keySpace, staleAfter: nil, configuration: .init())
     }
 
     /// Creates an observable data bucket with configurable snapshot freshness.
@@ -101,17 +100,25 @@ public final class Bucket<
     ///     Must be nonnegative. `nil` preserves unlimited cache reuse; zero
     ///     requires remote validation on every cached snapshot load.
     ///   - configuration: The sources attached to this bucket.
-    public init(
+    public convenience init(
         _ keySpace: Space,
         staleAfter: Duration? = nil,
-        @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space>
+        @BucketBuilder<Space> configuration: () -> BucketConfiguration<Space, Operation>
+    ) where Scope == UnpartitionedBucketScope {
+        self.init(keySpace, staleAfter: staleAfter, configuration: configuration())
+    }
+
+    private init(
+        _ keySpace: Space,
+        staleAfter: Duration?,
+        configuration: BucketConfiguration<Space, Operation>
     ) where Scope == UnpartitionedBucketScope {
         self.keySpace = keySpace
         self.staleAfter = staleAfter
         unpartitioned = BucketPartition(
             keySpace,
             staleAfter: staleAfter,
-            configuration: configuration()
+            configuration: configuration
         )
         partitionConfiguration = nil
     }
@@ -135,14 +142,22 @@ public final class Bucket<
     ///     zero requires remote validation on every cached snapshot load.
     ///     Local-only partitions ignore freshness.
     ///   - configuration: The sources for one selected partition.
-    public init<Partition>(
+    public convenience init<Partition>(
         _ keySpace: Space,
         partitionedBy _: Partition.Type,
         staleAfter: Duration? = nil,
         @BucketBuilder<Space> configuration:
-            @escaping @MainActor @Sendable (Partition) ->
-                BucketConfiguration<Space>
+            @escaping @MainActor @Sendable (Partition) -> BucketConfiguration<Space, Operation>
     ) where Scope == PartitionedScope<Partition> {
+        self.init(keySpace, staleAfter: staleAfter, partitionConfiguration: configuration)
+    }
+
+    private init(
+        _ keySpace: Space,
+        staleAfter: Duration?,
+        partitionConfiguration: @escaping @MainActor @Sendable (Scope.Partition) ->
+            BucketConfiguration<Space, Operation>
+    ) {
         precondition(
             staleAfter.map { $0 >= .zero } ?? true,
             "staleAfter must be nonnegative."
@@ -150,7 +165,7 @@ public final class Bucket<
         self.keySpace = keySpace
         self.staleAfter = staleAfter
         unpartitioned = nil
-        partitionConfiguration = configuration
+        self.partitionConfiguration = partitionConfiguration
     }
 
     // Work around a Swift 6.3 EarlyPerfInliner crash in the synthesized
@@ -264,40 +279,14 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
         try await storage.load(using: policy)
     }
 
-    /// Inserts or replaces one value in the atomic snapshot.
+    /// Runs an operation in the bucket's mutation queue.
     ///
-    /// For an ``IndexedKey``, the key's index operation selects the entry and
-    /// replacement retains its insertion position. This operation establishes a
-    /// complete snapshot and supersedes source work. It immediately publishes
-    /// and persists the submitted value. When ``RemoteSource`` declares
-    /// ``Store``, Continuum then reconciles the server-authoritative value.
-    ///
-    /// - Parameter value: The value to insert or replace.
-    /// - Throws: An error raised by ``Store`` or a writable ``LocalSource``.
-    ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence. Caller
-    ///   cancellation also restores state if no newer operation owns it, but
-    ///   does not become the bucket's error.
-    func store(_ value: Space.Value) async throws {
-        try await storage.store(value)
-    }
-
-    /// Removes one value from the atomic snapshot.
-    ///
-    /// Indexed snapshots remain established when their final value is removed.
-    /// Removing a singleton value returns that bucket to an unloaded state.
-    /// The normalized result is immediately published and persisted. When
-    /// ``RemoteSource`` declares ``Remove``, that operation then confirms the
-    /// mutation.
-    ///
-    /// - Parameter input: The value to remove.
-    /// - Throws: An error raised by ``Remove`` or a writable ``LocalSource``.
-    ///   A failed mutation restores the previously established snapshot in
-    ///   observable memory and attempts to restore local persistence. Caller
-    ///   cancellation also restores state if no newer operation owns it, but
-    ///   does not become the bucket's error.
-    func remove(_ input: Space.Input) async throws {
-        try await storage.remove(input)
+    /// The configured ``Mutate`` handler receives the operation and can
+    /// optimistically edit the snapshot. Buckets without a custom handler
+    /// accept a ``MutationAction`` closure. A failure rolls back owned edits;
+    /// reset and forced remote loads supersede pending mutations.
+    func mutate(_ operation: Operation) async throws {
+        try await storage.mutate(operation)
     }
 
     /// Forgets the current snapshot, pagination state, and writable local
@@ -325,18 +314,6 @@ where
     /// The current singleton value without starting a load.
     var value: Space.Value? {
         storage.value
-    }
-
-    /// Removes the singleton value and returns the bucket to an unloaded state.
-    ///
-    /// The value is immediately removed from observable memory and writable
-    /// local sources before a configured remote ``Remove`` confirms it.
-    ///
-    /// - Throws: An error raised by ``Remove`` or a writable ``LocalSource``.
-    ///   A failure restores the prior value in observable memory and attempts
-    ///   to restore local persistence.
-    func remove() async throws {
-        try await storage.remove()
     }
 }
 
@@ -399,7 +376,7 @@ public extension Bucket where Scope: PartitionedBucketScope {
     /// Use bounded query identities for long-lived buckets.
     ///
     /// - Parameter partition: The stable identity of the list to select.
-    subscript(partition: Scope.Partition) -> BucketPartition<Space> {
+    subscript(partition: Scope.Partition) -> BucketPartition<Space, Operation> {
         if let existing = partitionStorage[partition] {
             return existing
         }
@@ -419,7 +396,7 @@ public extension Bucket where Scope: PartitionedBucketScope {
 }
 
 extension Bucket where Scope == UnpartitionedBucketScope {
-    var storage: BucketPartition<Space> {
+    var storage: BucketPartition<Space, Operation> {
         guard let unpartitioned else {
             preconditionFailure("An unpartitioned bucket requires atomic storage.")
         }
@@ -432,7 +409,7 @@ extension Bucket: AsyncSequence where Scope == UnpartitionedBucketScope {
     /// The result or reset emitted by this bucket.
     public typealias Element = Update<Space.Snapshot>
     /// An independent iterator over this bucket's outcomes.
-    public typealias AsyncIterator = BucketPartition<Space>.AsyncIterator
+    public typealias AsyncIterator = BucketPartition<Space, Operation>.AsyncIterator
 
     /// Observes outcomes without starting a load.
     ///

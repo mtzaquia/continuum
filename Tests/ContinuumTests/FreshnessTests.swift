@@ -5,7 +5,7 @@ import Testing
 struct FreshnessTests {
     @Test("Configured bucket initializers default to unlimited cache reuse")
     func defaultFreshness() async throws {
-        typealias Configuration = BucketConfiguration<Key<Int>>
+        typealias Configuration = BucketConfiguration<Key<Int>, MutationAction<Key<Int>>>
         let makeBucket: @MainActor (Key<Int>, () -> Configuration) -> ValueBucket<Int> = { key, configuration in
             Bucket(key, configuration: configuration)
         }
@@ -93,7 +93,7 @@ struct FreshnessTests {
         #expect(try await local.load() == 7)
         #expect(try await local.load() == 7)
         let memory = Bucket(Key<Int>("freshness.memory"), staleAfter: .zero) {}
-        try await memory.store(9)
+        try await memory.put(9)
         #expect(try await memory.load() == 9)
     }
 
@@ -303,7 +303,7 @@ struct FreshnessTests {
         let time = TestTime()
         let service = Service()
         let key = IndexedKey<Int, Int>("freshness.pages", indexedBy: { $0 })
-        let bucket = BucketPartition(
+        let bucket: BucketPartition<IndexedKey<Int, Int>, MutationAction<IndexedKey<Int, Int>>> = BucketPartition(
             key,
             staleAfter: .seconds(10),
             now: { time.instant },
@@ -311,17 +311,15 @@ struct FreshnessTests {
                 RemoteSource {
                     Load { Page(values: [try await service.load()], next: 1) }
                     NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
-                    LoadEntry { (id: Int) in id }
-                    Store { (value: Int) in value }
-                    Remove { (_: Int) in }
+                    Load { (id: Int) in id }
                 },
             ])
         )
         try await bucket.load()
         time.advance(by: .seconds(2))
-        try await bucket.store(3)
+        try await bucket.put(3)
         time.advance(by: .seconds(2))
-        try await bucket.remove(3)
+        try await bucket.delete(3)
         time.advance(by: .seconds(2))
         #expect(try await bucket.load(id: 1, using: .remote) == 1)
         time.advance(by: .seconds(2))
@@ -337,14 +335,15 @@ struct FreshnessTests {
         let gate = RemoteGate()
         let service = Service()
         let bucket = makePartition(time: time) {
-            RemoteSource {
-                Load { try await service.load() }
-                Store { _ in try await gate.load() }
-            }
+            RemoteSource { try await service.load() }
         }
         try await bucket.load()
         time.advance(by: .seconds(10))
-        let mutation = Task { try await bucket.store(7) }
+        let mutation = Task {
+            try await bucket.mutate { mutation in
+                try await mutation.update { _ in 7 } remotely: { try await gate.load() }
+            }
+        }
         await until { gate.pending != nil }
         let cached = Task { try await bucket.load() }
         #expect(bucket.value == 7)
@@ -357,8 +356,9 @@ struct FreshnessTests {
     private func makePartition(
         time: TestTime,
         staleAfter: Duration? = .seconds(10),
-        @BucketBuilder<Key<Int>> configuration: () -> BucketConfiguration<Key<Int>>
-    ) -> BucketPartition<Key<Int>> {
+        @BucketBuilder<Key<Int>> configuration:
+            () -> BucketConfiguration<Key<Int>, MutationAction<Key<Int>>>
+    ) -> BucketPartition<Key<Int>, MutationAction<Key<Int>>> {
         BucketPartition(
             Key<Int>("freshness.test"),
             staleAfter: staleAfter,

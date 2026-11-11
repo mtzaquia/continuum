@@ -200,7 +200,8 @@ public typealias IndexedBucket<
     Value: Sendable
 > = Bucket<
     IndexedKey<Index, Value>,
-    UnpartitionedBucketScope
+    UnpartitionedBucketScope,
+    MutationAction<IndexedKey<Index, Value>>
 >
 
 /// A partitioned observable bucket whose partitions each own one atomic
@@ -210,3 +211,18 @@ public typealias PartitionedIndexedBucket<
     Index: Hashable & Sendable,
     Value: Sendable
 > = PartitionedBucket<Partition, IndexedKey<Index, Value>>
+
+/// An unpartitioned indexed collection with a typed mutation operation.
+public typealias MutableIndexedBucket<
+    Index: Hashable & Sendable,
+    Value: Sendable,
+    Operation: Sendable
+> = MutableBucket<IndexedKey<Index, Value>, Operation>
+
+/// A bucket whose partitions each own an indexed collection and accept a typed mutation operation.
+public typealias PartitionedMutableIndexedBucket<
+    Partition: Hashable & Sendable,
+    Index: Hashable & Sendable,
+    Value: Sendable,
+    Operation: Sendable
+> = PartitionedMutableBucket<Partition, IndexedKey<Index, Value>, Operation>

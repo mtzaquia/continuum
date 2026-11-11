@@ -22,6 +22,33 @@ Direct calls keep their existing spelling. If you pass an initializer as a
 function value, use the full signature or wrap the call in a closure to use
 the defaults.
 
+## Migrate mutations and entry loaders
+
+Replace `Store` and `Remove` with one `Mutate` declaration in the bucket
+builder. The handler's first parameter determines the operation type accepted
+by `mutate(_:)`. Use `mutation.update` for an established snapshot and
+`mutation.update(id:)` for an indexed entry. Pair an edit with its endpoint
+using `remotely:`. The endpoint can return the authoritative entry or snapshot
+for Continuum to publish and persist.
+
+A bucket without a typed handler accepts a closure through `mutate(_:)`.
+Use `mutation.replace(with:)` to deliberately establish a complete snapshot
+or clear it with `nil`. Indexed edits can return an empty array to keep an
+established empty collection. [Mutation guide](remote-mutations.md)
+
+When spelling the generic types directly, `Bucket` and `BucketPartition`
+now take the operation type as their last argument. The existing bucket
+aliases use `MutationAction<Space>` for closure-based mutations. For a typed
+handler, use the corresponding `Mutable` alias, such as
+`MutableIdentifiedBucket<Card, CardOperation>` or
+`PartitionedMutableIdentifiedBucket<ProfileID, Card, CardOperation>`.
+[Typed mutation aliases](remote-mutations.md#annotate-a-typed-bucket)
+
+Replace `LoadEntry { id in … }` with `Load { id in … }`. The call site
+`load(id:using:)` keeps its spelling.
+If you explicitly spell `Load`'s generic arguments, use `Load<Void, Snapshot>`
+for a complete snapshot and `Load<ID, Value>` for an entry.
+
 ## Observe refresh errors separately
 
 In 1.1.0 a failed collection refresh published `.result(.failure(error))` even
