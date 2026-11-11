@@ -51,6 +51,11 @@ the requested policy. Remove closures that only forward the policy to the
 bucket. Keep custom actions, and pass `Input(bucket) { _ in }` for a bucket
 that should only be observed.
 
+Nested composition inputs also load with the parent's policy. Remove closures
+that only forward the policy to a child. Use `Input(child) { _ in }` to keep
+the child observation-only through that input. Each top-level call loads shared
+children once across the inputs that forward automatically.
+
 By default, failures in `latest` now carry a `CompositionError`, even for a
 single error. Inspect its `errors` array to recover the underlying types. A
 custom `mapFailures:` now receives the full list of current errors, including

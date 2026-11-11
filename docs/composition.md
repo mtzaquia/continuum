@@ -22,9 +22,10 @@ indexed favorites bucket supplies `[Favorite]`. No snapshot wrapper is exposed.
 | Input | Behavior |
 | --- | --- |
 | `Input(bucket)` or `Input(bucket[key])` | Observe the snapshot and load it with the composition's policy. |
+| `Input(composition)` | Observe the child and forward the parent's load policy to it. |
 | `Input(source)` for other update sources | Observe the source. |
 | `Input(source) { policy in … }` | Run the supplied action in place of any default action. |
-| `Input(bucket) { _ in }` | Observe the bucket without loading it through the composition. |
+| `Input(source) { _ in }` | Observe a bucket or child composition without loading it through this input. |
 | `Input { expression }` | Observe an always-available value. Add `load: { policy in … }` for loading. |
 | `Input(update: { … }, load: …)` | Observe an external outcome that can be available, unavailable, or failed. The load action is optional. |
 | `.optional()` | Supply nil when the input has no available outcome or its outcome is a failure. |
@@ -47,11 +48,11 @@ await displayUser.load() // Uses .cached.
 await displayUser.load(using: .remote)
 ```
 
-The composition forwards its policy unchanged to bucket and partition loaders
-and to custom actions. Independent actions run concurrently, and `load` waits
-for all of them. A failed action does not cancel siblings. Custom actions update
-their observed sources. The composition reads values from those sources as they
-become available.
+The composition forwards its policy unchanged to bucket and partition loaders,
+child compositions, and custom actions. Independent actions run concurrently,
+and `load` waits for all of them. A failed action does not cancel siblings.
+Custom actions update their observed sources. The composition reads values
+from those sources as they become available.
 
 Composition loading returns `Void`. A bucket input with an established snapshot
 continues to supply its value after its load action throws. Sibling changes still
@@ -278,11 +279,13 @@ Neither completion nor restart emits reset.
 
 ## Nest and select inputs
 
-Use a composition as an ordinary source. Loading remains explicit:
+Use a composition as an input to observe its outcome and load it with the
+parent. In this example, `screen.load(using: .remote)` forwards `.remote` to
+`displayUser` and to `repo.recommendations` when that input is included.
 
 ```swift
 let screen = Composition {
-  Input(displayUser) { policy in await displayUser.load(using: policy) }
+  Input(displayUser)
   if includeRecommendations {
     Input(repo.recommendations)
   }
@@ -290,6 +293,12 @@ let screen = Composition {
   ScreenModel(user: user, recommendations: recommendations)
 }
 ```
+
+Each top-level load automatically loads a shared child instance once, even when
+multiple inputs or branches reference it. Each branch waits for the child to
+finish. Separate top-level calls run independently. A custom input closure
+replaces forwarding for that input. Use `Input(displayUser) { _ in }` to keep
+observing the child without loading it through that input.
 
 Branches are selected once at construction. Both sides of `if/else` must supply
 the same types in the same order. An `if` without `else` makes each parameter

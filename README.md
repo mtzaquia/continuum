@@ -121,9 +121,9 @@ for await update in titles {
 
 Add `Input` declarations to combine sources. Inputs are required by default;
 `.optional()` supplies nil when unavailable or failed. `.resolving` derives
-relationships from a collection's keys. `titles.load()` loads bucket inputs
-with `.cached` by default. Use `Input(posts) { _ in }` to observe a bucket
-without loading it. Iteration itself never starts a bucket load.
+relationships from a collection's keys. `titles.load()` loads bucket and nested
+composition inputs with `.cached` by default. Use `Input(source) { _ in }` to
+observe an input without loading it through the composition.
 Observe `error` for current input and transform errors, including failed
 refreshes with retained data. The default `CompositionError` lists them in
 input order.

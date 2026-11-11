@@ -207,19 +207,19 @@ final class RelationshipInputState<Element: Sendable, ID: Hashable & Sendable, R
                              unavailable: unavailable, failures: errors, resetRevision: resetRevision)
     }
 
-    func load(_ policy: LoadPolicy) async {
+    func load(_ context: CompositionLoadContext) async {
         guard !Task.isCancelled else { return }
         task?.cancel()
         loadingRoot = true
         let action = root.load
         let task = Task { @MainActor [weak self] in
-            await action?(policy)
+            await action?(context)
             guard !Task.isCancelled else { return }
             self?.loadingRoot = false
             let ids = self?.prepareRoot(reload: true) ?? []
             guard let observation = self?.rootObservation.change else { return }
             let operations = self?.operations(for: ids) ?? []
-            let results = await Self.resolve(operations, policy: policy)
+            let results = await Self.resolve(operations, policy: context.policy)
             guard !Task.isCancelled, observation.isCurrent else { return }
             self?.complete(results)
         }

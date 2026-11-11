@@ -104,7 +104,7 @@ struct IntegrationTests {
             Input { [1] }.resolving(\.self, from: names)
         } transform: { _, names in names[1]?.name ?? "" }
         let composition = Composition {
-            Input(child) { policy in await child.load(using: policy) }
+            Input(child)
         } transform: { $0 }
         let model = Consumer(composition)
         let data = model.data
@@ -141,10 +141,10 @@ struct IntegrationTests {
             Input(b) { _ in b.update = .result(.success(20)) }
         } transform: { $0 + $1 }
         let middle = Composition {
-            Input(inner) { policy in await inner.load(using: policy) }
+            Input(inner)
         } transform: { $0 + 0 }
         let composition = Composition {
-            Input(middle) { policy in await middle.load(using: policy) }
+            Input(middle)
         } transform: { $0 + 0 }
         let model = Consumer(composition) { await composition.load(using: .remote) }
         let data = model.data

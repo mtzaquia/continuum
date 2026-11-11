@@ -457,6 +457,42 @@ struct CompositionTests {
         #expect(success(composition.latest) == 2)
     }
 
+    @Test("Cancelling a top-level load cancels a shared child's action")
+    func sharedChildCancellation() async {
+        let (started, start) = AsyncStream<Void>.makeStream()
+        var calls = 0
+        var cancelled = false
+        let child = Composition {
+            Input { 1 } load: { _ in
+                calls += 1
+                start.yield(())
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch {
+                    cancelled = Task.isCancelled
+                    throw error
+                }
+            }
+        } transform: { $0 }
+        let parent = Composition {
+            Input(child)
+            Input(child)
+        } transform: { $0 + $1 }
+
+        let loading = Task { await parent.load() }
+        var starts = started.makeAsyncIterator()
+        _ = await starts.next()
+        loading.cancel()
+        await loading.value
+
+        #expect(calls == 1)
+        #expect(cancelled)
+        #expect(!child.isLoading)
+        #expect(!parent.isLoading)
+        #expect(parent.error == nil)
+        #expect(success(parent.latest) == 2)
+    }
+
     @Test("Domain nil is a successful concrete value")
     func domainNil() {
         let composition = Composition {
@@ -564,32 +600,81 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 18)
     }
 
-    @Test("Nested loading is explicit and initial unavailability stays silent")
-    func nestedLoading() async {
+    @Test("Nested inputs forward the policy unless a closure overrides loading",
+          arguments: [LoadPolicy.cached, .cachedThenRemote, .remote])
+    func nestedLoading(policy: LoadPolicy) async {
         let source = Source<Int>()
-        var policies: [String] = []
+        var policies: [LoadPolicy] = []
         let inner = Composition {
             Input(source) { policy in
-                if case .remote = policy { policies.append("remote") }
+                policies.append(policy)
                 source.update = .result(.success(4))
             }
         } transform: { $0 * 2 }
-        let passive = Composition { Input(inner) } transform: { $0 + 1 }
-        await passive.load(using: .remote)
+        let passive = Composition { Input(inner) { _ in } } transform: { $0 + 1 }
+        await passive.load(using: policy)
         #expect(policies.isEmpty)
         #expect(isReset(passive.latest))
-        let outer = Composition {
-            Input(inner) { policy in await inner.load(using: policy) }
-        } transform: { $0 + 1 }
+        let middle = Composition { Input(inner) } transform: { $0 }
+        let outer = Composition { Input(middle) } transform: { $0 + 1 }
         let first = Task {
             var iterator = outer.makeAsyncIterator()
             return await iterator.next()
         }
-        for _ in 0..<10 { await Task.yield() }
-        await outer.load(using: .remote)
+        #expect(isReset(outer.latest))
+        await outer.load(using: policy)
         #expect(success(await first.value) == 9)
         #expect(success(outer.latest) == 9)
-        #expect(policies == ["remote"])
+        await passive.load(using: policy)
+        #expect(success(passive.latest) == 9)
+        #expect(policies == [policy])
+
+        let custom = Composition {
+            Input(inner) { _ in await inner.load(using: .cached) }
+        } transform: { $0 }
+        await custom.load(using: .remote)
+        #expect(policies == [policy, .cached])
+    }
+
+    @Test("A child shared across branches loads once for each overlapping or subsequent call")
+    func sharedChildLoading() async {
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (release, unblock) = AsyncStream<Void>.makeStream()
+        var policies: [LoadPolicy] = []
+        let child = Composition {
+            Input { 1 } load: { policy in
+                policies.append(policy)
+                if policies.count == 1 {
+                    start.yield(())
+                    for await _ in release {}
+                }
+            }
+        } transform: { $0 }
+        let left = Composition { Input(child) } transform: { $0 }
+        let right = Composition { Input(child) } transform: { $0 }
+        let parent = Composition {
+            Input(left)
+            Input(right)
+            Input(child).optional()
+        } transform: { $0 + $1 + ($2 ?? 0) }
+
+        let first = Task { await parent.load(using: .remote) }
+        var starts = started.makeAsyncIterator()
+        _ = await starts.next()
+        #expect(parent.isLoading)
+        #expect(child.isLoading)
+        await parent.load(using: .remote)
+        #expect(parent.isLoading)
+        #expect(child.isLoading)
+        unblock.finish()
+        await first.value
+        #expect(!parent.isLoading)
+        #expect(!child.isLoading)
+        #expect(policies == [.remote, .remote])
+
+        await parent.load()
+        #expect(policies == [.remote, .remote, .cached])
+        #expect(success(parent.latest) == 3)
     }
 
     @Test("New parents start from the current outcome without replaying historical resets")

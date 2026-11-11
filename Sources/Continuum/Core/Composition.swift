@@ -22,6 +22,7 @@
 
 import Foundation
 import Observation
+import os
 
 /// The default aggregate for errors reported by a composition.
 nonisolated public struct CompositionError: LocalizedError {
@@ -58,10 +59,50 @@ protocol CompositionInputSource<Snapshot>: UpdateSource, Sendable {
     var currentUpdate: Update<Snapshot> { get }
     var underlyingErrors: [any Error] { get }
     func activate(forLoad: Bool) -> (@MainActor () -> Void)?
+    func load(in context: CompositionLoadContext) async
 }
 
 // The returned closure ends reuse of subscriptions started for the first load.
 typealias InputActivation = @MainActor (_ forLoad: Bool) -> (@MainActor () -> Void)?
+typealias InputLoad = @MainActor @Sendable (CompositionLoadContext) async -> Void
+
+final class CompositionLoadContext: Sendable {
+    private struct State: Sendable {
+        var isCancelled = false
+        var children: [ObjectIdentifier: Task<Void, Never>] = [:]
+    }
+
+    let policy: LoadPolicy
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    init(policy: LoadPolicy) { self.policy = policy }
+
+    @MainActor
+    func load(_ child: any CompositionInputSource) async {
+        guard !Task.isCancelled else { return }
+        let id = ObjectIdentifier(child)
+        let task = state.withLock { state -> Task<Void, Never>? in
+            guard !state.isCancelled else { return nil }
+            if let task = state.children[id] { return task }
+            let task = Task { @MainActor in
+                guard !Task.isCancelled else { return }
+                await child.load(in: self)
+            }
+            state.children[id] = task
+            return task
+        }
+        await task?.value
+    }
+
+    func cancel() {
+        // The top-level call owns shared work, even if an individual branch stops waiting.
+        let tasks = state.withLock { state in
+            state.isCancelled = true
+            return state.children.values
+        }
+        for task in tasks { task.cancel() }
+    }
+}
 
 @MainActor
 @Observable
@@ -158,7 +199,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     private var activeLoads = 0
     @ObservationIgnored private let evaluate: @MainActor () -> CompositionEvaluation<Output>
     @ObservationIgnored private let activations: [InputActivation]
-    @ObservationIgnored private let loads: [@MainActor @Sendable (LoadPolicy) async -> Void]
+    @ObservationIgnored private let loads: [InputLoad]
     @ObservationIgnored private var isActive = false
     @ObservationIgnored private var subscribers: [UUID: AsyncStream<Element>.Continuation] = [:]
     @ObservationIgnored private var previousUnavailable: [Bool] = []
@@ -170,7 +211,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
 
     init(
         activations: [InputActivation],
-        loads: [@MainActor @Sendable (LoadPolicy) async -> Void],
+        loads: [InputLoad],
         evaluate: @escaping @MainActor () -> CompositionEvaluation<Output>
     ) {
         self.activations = activations
@@ -181,15 +222,26 @@ public final class Composition<Output: Sendable>: AsyncSequence {
 
     /// Runs input loading actions concurrently and waits for them to finish.
     ///
-    /// Bucket inputs load with the supplied policy by default. Custom actions
-    /// receive the same policy. Required action failures can fail the outcome.
-    /// A bucket input with an available snapshot still contributes its value.
-    /// Read ``error`` for its refresh failure. Siblings continue after a failure.
-    /// Cancellation propagates to actions without publishing an error. Overlapping calls run
-    /// independently, and the newest invocation of each action owns its error
-    /// state. Bucket loading policies still govern source work. Duplicate
-    /// declarations invoke their actions independently.
+    /// Bucket and composition inputs load with the supplied policy by default.
+    /// Each shared child composition loads once per top-level call. Custom
+    /// actions receive the same policy and run for each declaration.
+    ///
+    /// Required action failures can fail the outcome. A bucket input with an
+    /// available snapshot still contributes its value. Read ``error`` for its
+    /// refresh failure. Siblings continue after a failure. Cancellation
+    /// propagates without publishing an error. Overlapping calls run independently,
+    /// and the newest invocation of each action owns its error state. Bucket
+    /// loading policies still govern source work.
     public func load(using policy: LoadPolicy = .cached) async {
+        let context = CompositionLoadContext(policy: policy)
+        await withTaskCancellationHandler {
+            await load(in: context)
+        } onCancel: {
+            context.cancel()
+        }
+    }
+
+    func load(in context: CompositionLoadContext) async {
         activeLoads += 1
         let finishActivation = activate(forLoad: true)
         defer {
@@ -198,7 +250,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         }
         await withTaskGroup(of: Void.self) { group in
             for action in loads {
-                group.addTask { await action(policy) }
+                group.addTask { await action(context) }
             }
         }
         recompute()
@@ -337,7 +389,7 @@ public extension Composition {
     ) {
         let inputs = inputs().makeInputs()
         var activations: [InputActivation] = []
-        var loads: [@MainActor @Sendable (LoadPolicy) async -> Void] = []
+        var loads: [InputLoad] = []
         for input in repeat each inputs {
             if let activation = input.activate { activations.append(activation) }
             if let load = input.load { loads.append(load) }

@@ -127,8 +127,8 @@ let feed = Composition {
 await feed.load(using: .remote)
 ```
 
-Bucket inputs load automatically with the policy passed to the composition.
-Pass a custom closure to override the bucket loader, or use
+Bucket and nested composition inputs load automatically with the policy passed
+to the composition. Pass a custom closure to override the bucket loader, or use
 `Input(repository.posts) { _ in }` to observe the snapshot without loading it.
 Independent inputs load concurrently. A resolved input loads its root before
 its related keys. `load` returns `Void`. An available bucket snapshot continues

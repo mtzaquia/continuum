@@ -24,6 +24,9 @@
 - `Composition.load(using:)` loads bucket and selected partition inputs with
   the supplied policy, including optional inputs and relationship roots. Pass
   `Input(bucket) { _ in }` to observe a bucket without loading it.
+- Nested composition inputs forward the parent's load policy by default. Each
+  shared child loads once per top-level call. Use `Input(child) { _ in }` to
+  observe the child without loading it through that input.
 - Retired the deprecated update aliases, `bucketUpdates`, `updates()`, and the
   legacy reset overloads and `ResetScope`. Iterate sources directly, use
   `Composition` to combine inputs, and call `try await reset()` to reset.

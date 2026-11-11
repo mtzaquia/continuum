@@ -45,8 +45,9 @@ struct SequenceInputTests {
         #expect(factories == 1)
     }
 
-    @Test("A first explicit nested load creates one restart subscription before the action")
-    func firstLoad() async {
+    @Test("A first nested load creates one restart subscription before the action",
+          arguments: [false, true])
+    func firstLoad(custom: Bool) async {
         var factories = 0
         var loads = 0
         let inner = Composition {
@@ -59,7 +60,11 @@ struct SequenceInputTests {
             })
         } transform: { $0 }
         let outer = Composition {
-            Input(inner) { policy in await inner.load(using: policy) }
+            if custom {
+                Input(inner) { policy in await inner.load(using: policy) }
+            } else {
+                Input(inner)
+            }
         } transform: { $0 }
 
         await outer.load()

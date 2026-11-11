@@ -106,7 +106,7 @@ public extension CompositionBuilder {
                     var snapshot = state.rootState
                     snapshot.reportedFailures = { root.read().reportedFailures?() }
                     return snapshot
-                }, load: { policy in await state.load(policy) }, activate: root.activate),
+                }, load: { context in await state.load(context) }, activate: root.activate),
                 Input(read: { state.relatedState })
             )
         })

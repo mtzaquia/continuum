@@ -23,20 +23,22 @@
 /// An observed bucket, composition, or expression with an optional loading action.
 ///
 /// Inputs are required by default. Use ``optional()`` to supply `nil` when
-/// unavailable or failed. Bucket and selected partition inputs load by default
-/// when the composition loads. Construction does not load the source.
+/// unavailable or failed. Bucket, selected partition, and nested composition
+/// inputs load by default when the composition loads. Construction does not
+/// load the source.
 @MainActor
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
-    let load: (@MainActor @Sendable (LoadPolicy) async -> Void)?
+    let load: InputLoad?
     let activate: InputActivation?
     private var materialize: (@MainActor () -> Input<Value>)? = nil
 
     /// Observes a source and lets it participate in explicit composition loads.
     ///
-    /// By default, buckets and selected partitions load with the composition's
-    /// policy. Other sources are observation-only. An explicit `load` closure
-    /// replaces the default action. Use `{ _ in }` for an observation-only bucket.
+    /// By default, buckets, selected partitions, and nested compositions load
+    /// with the composition's policy. Other sources are observation-only. An
+    /// explicit `load` closure replaces the default action. Use `{ _ in }` to
+    /// observe a source without loading it.
     ///
     /// The action updates the observed source. An available bucket snapshot
     /// takes precedence over a thrown load error. Errors already published by
@@ -154,9 +156,9 @@ public struct Input<Value: Sendable> {
                 try await state.waitUntilSubscribed()
                 try await load?(policy)
             }
-            let action: (@MainActor @Sendable (LoadPolicy) async -> Void)?
+            let action: InputLoad?
             if load != nil || subscriptionOnLoad == .restart {
-                action = { policy in await loader.run(policy) }
+                action = { context in await loader.run(context.policy) }
             } else {
                 action = nil
             }
@@ -215,7 +217,9 @@ public struct Input<Value: Sendable> {
             activate = nil
         }
         if let loader {
-            load = { policy in await loader.run(policy) }
+            load = { context in await loader.run(context.policy) }
+        } else if let nested {
+            load = { context in await context.load(nested) }
         } else {
             load = nil
         }
@@ -223,7 +227,7 @@ public struct Input<Value: Sendable> {
 
     init(
         read: @escaping @MainActor () -> CompositionInputState<Value>,
-        load: (@MainActor @Sendable (LoadPolicy) async -> Void)? = nil,
+        load: InputLoad? = nil,
         activate: InputActivation? = nil,
         materialize: (@MainActor () -> Input<Value>)? = nil
     ) {

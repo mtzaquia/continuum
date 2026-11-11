@@ -146,6 +146,29 @@ struct RelationshipInputTests {
         #expect(await resolver.policies == rootPolicies)
     }
 
+    @Test("A relationship loads its shared composition root once before resolving keys")
+    func sharedCompositionRoot() async {
+        let source = Source<[Post]>()
+        var policies: [LoadPolicy] = []
+        let resolver = ResolverProbe()
+        await resolver.setFailure(false)
+        let root = Composition {
+            Input(source) { policy in
+                policies.append(policy)
+                source.latest = .result(.success([Post(id: 1, authorID: 7)]))
+            }
+        } transform: { $0 }
+        let composition = Composition {
+            Input(root).resolving(\.authorID) { _, policy in try await resolver.resolve(policy) }
+            Input(root)
+        } transform: { posts, authors, _ in Pair(posts: posts, authors: authors) }
+
+        await composition.load(using: .remote)
+        #expect(policies == [.remote])
+        #expect(await resolver.policies.last == "remote")
+        #expect(value(composition.latest)?.authors == [7: "resolved"])
+    }
+
     @Test("New root snapshots and refreshes supersede cancellation-uncooperative work")
     func supersession() async {
         let source = Source<[Post]>()
