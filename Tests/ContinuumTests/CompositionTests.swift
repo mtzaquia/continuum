@@ -158,6 +158,40 @@ struct CompositionTests {
         #expect(composition.error == nil)
     }
 
+    @Test("Retry keeps an observable query's load failure until success")
+    func observableUpdateRetry() async {
+        let repository = RepositoryState<Int>()
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (release, unblock) = AsyncStream<Void>.makeStream()
+        let composition = Composition {
+            Input(update: { repository.update }, load: { policy in
+                guard policy == .remote else { throw NumberedError(number: 1) }
+                start.yield(())
+                for await _ in release { break }
+                repository.phase = .loaded(8)
+            })
+        } transform: { $0 + 1 }
+
+        await composition.load()
+        var updates = composition.makeAsyncIterator()
+        #expect(isFailure(await updates.next()))
+
+        let retry = Task { await composition.load(using: .remote) }
+        var starts = started.makeAsyncIterator()
+        _ = await starts.next()
+        #expect(composition.isLoading)
+        #expect(isFailure(composition.latest))
+        #expect(((composition.error as? CompositionError)?.errors.first as? NumberedError)?.number == 1)
+
+        unblock.yield(())
+        await retry.value
+        var update: Update<Int>?
+        repeat { update = await updates.next() } while isFailure(update)
+        #expect(success(update) == 9)
+        #expect(success(composition.latest) == 9)
+        #expect(composition.error == nil)
+    }
+
     @Test("Nested compositions preserve an observed reset before an accompanying failure")
     func observableUpdateNestedReset() async {
         let repository = RepositoryState<Int>()
@@ -418,19 +452,17 @@ struct CompositionTests {
         #expect(success(composition.latest) == 12)
     }
 
-    @Test("Overlapping loads retain loading state and ignore obsolete action errors")
-    func overlappingLoads() async {
+    @Test("Overlapping loads retain loading state and ignore obsolete action outcomes",
+          arguments: [false, true])
+    func overlappingLoads(obsoleteLoadFails: Bool) async {
         let (started, start) = AsyncStream<Void>.makeStream()
         let (release, unblock) = AsyncStream<Void>.makeStream()
-        var calls = 0
         let composition = Composition {
-            Input { 1 } load: { _ in
-                calls += 1
-                if calls == 1 {
-                    start.yield(())
-                    for await _ in release { break }
-                    throw TestError.failed
-                }
+            Input { 1 } load: { policy in
+                guard policy == .cached else { throw NumberedError(number: 2) }
+                start.yield(())
+                for await _ in release { break }
+                if obsoleteLoadFails { throw NumberedError(number: 1) }
             }
         } transform: { $0 + 1 }
         let first = Task { await composition.load() }
@@ -442,30 +474,33 @@ struct CompositionTests {
         unblock.yield(())
         await first.value
         #expect(!composition.isLoading)
-        #expect(success(composition.latest) == 2)
+        #expect(isFailure(composition.latest))
+        #expect(((composition.error as? CompositionError)?.errors.first as? NumberedError)?.number == 2)
     }
 
-    @Test("Cancellation reaches loading actions without failing the composition")
+    @Test("Cancellation reaches a retry and preserves its previous error")
     func cancellation() async {
         let (started, start) = AsyncStream<Void>.makeStream()
         let (blocked, _) = AsyncStream<Void>.makeStream()
         var cancelled = false
         let composition = Composition {
-            Input { 1 } load: { _ in
+            Input { 1 } load: { policy in
+                guard policy == .remote else { throw TestError.failed }
                 start.yield(())
                 for await _ in blocked {}
                 cancelled = Task.isCancelled
-                try Task.checkCancellation()
             }
         } transform: { $0 + 1 }
-        let loading = Task { await composition.load() }
+        await composition.load()
+        let loading = Task { await composition.load(using: .remote) }
         var starts = started.makeAsyncIterator()
         _ = await starts.next()
         loading.cancel()
         await loading.value
         #expect(cancelled)
         #expect(!composition.isLoading)
-        #expect(success(composition.latest) == 2)
+        #expect(isFailure(composition.latest))
+        #expect((composition.error as? CompositionError)?.errors.first is TestError)
     }
 
     @Test("Cancelling a top-level load cancels a shared child's action")

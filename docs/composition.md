@@ -237,7 +237,8 @@ the root of `.resolving`, with the relationship supplied by a separate lookup.
 Omit `load` for observation alone. An explicit composition load forwards its
 policy to the action. The action establishes a value by updating the observed
 state. If the closure reports a failure when the action throws, the reported
-failure is used. An otherwise unreported action error lasts until the next load.
+failure is used. An otherwise unreported action error stays visible during a
+retry. A successful action clears it, and a new failure replaces it.
 
 An observed reset propagates through nested compositions. If the repository
 resets and replaces its data before the closure is read again, Observation may

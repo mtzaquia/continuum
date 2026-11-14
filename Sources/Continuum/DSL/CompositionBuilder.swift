@@ -42,8 +42,8 @@ public struct Input<Value: Sendable> {
     ///
     /// The action updates the observed source. An available bucket snapshot
     /// takes precedence over a thrown load error. Errors already published by
-    /// the source follow its recovery. Other action errors remain until the next
-    /// load of this input.
+    /// the source follow its recovery. Other action errors remain while a retry
+    /// runs and are updated when the action succeeds or fails again.
     public init<Source: UpdateSource>(
         _ source: Source,
         load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
@@ -92,7 +92,8 @@ public struct Input<Value: Sendable> {
     /// Observes an expression and supplies an action to update its observable state.
     ///
     /// The policy is forwarded unchanged. A thrown action error fails this input
-    /// until its next load; use ``optional()`` to make such failures contribute nil.
+    /// until the action succeeds. A new failure replaces the previous error.
+    /// Use ``optional()`` to make such failures contribute `nil`.
     public init(
         _ read: @escaping @MainActor () -> Value,
         load: @escaping @MainActor (LoadPolicy) async throws -> Void

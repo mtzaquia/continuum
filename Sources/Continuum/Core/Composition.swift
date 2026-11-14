@@ -122,7 +122,6 @@ final class CompositionLoad {
 
     func run(_ policy: LoadPolicy) async {
         guard !Task.isCancelled else { return }
-        error = nil
         let action = action
         let task = Task {
             try Task.checkCancellation()
@@ -130,13 +129,18 @@ final class CompositionLoad {
         }
         currentTask = task
         defer { if currentTask == task { currentTask = nil } }
-        do {
-            try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        } catch {
-            guard currentTask == task, !Task.isCancelled,
-                  !(error is CancellationError) else { return }
-            if !sourceOwnsOutcome() { self.error = error }
+        let result = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
+        guard currentTask == task, !Task.isCancelled else { return }
+
+        let nextError: (any Error)?
+        switch result {
+        case .success:
+            nextError = nil
+        case .failure(let error):
+            guard !(error is CancellationError) else { return }
+            nextError = sourceOwnsOutcome() ? nil : error
         }
+        if error != nil || nextError != nil { error = nextError }
     }
 }
 
@@ -228,8 +232,9 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     ///
     /// Required action failures can fail the outcome. A bucket input with an
     /// available snapshot still contributes its value. Read ``error`` for its
-    /// refresh failure. Siblings continue after a failure. Cancellation
-    /// propagates without publishing an error. Overlapping calls run independently,
+    /// refresh failure. Siblings continue after a failure. An action retains its
+    /// previous error until it succeeds or fails again. Cancellation preserves
+    /// the action's error state. Overlapping calls run independently,
     /// and the newest invocation of each action owns its error state. Bucket
     /// loading policies still govern source work.
     public func load(using policy: LoadPolicy = .cached) async {
