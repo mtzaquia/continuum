@@ -4,13 +4,9 @@ import Observation
 import Testing
 
 @MainActor @Observable
-final class Source: LoadableUpdateSource {
+final class Source: UpdateSource {
     var update: Update<Int> = .reset
     var latest: Update<Int> { update }
-    var valueToLoad: Int?
-    func load(using policy: LoadPolicy) async {
-        if let valueToLoad { update = .result(.success(valueToLoad)) }
-    }
 }
 
 enum Failure: Error { case test }
@@ -106,32 +102,36 @@ struct IntegrationTests {
                 loadEntry: { id in NamedEntry(id: id, name: try await service.name(id)) }
             )
         }
-        let query = EntryQuery(names: names)
-        let child = Composition { Input(query) } transform: { $0.name }
-        let composition = Composition {
-            Input(child)
-        } transform: { $0 }
+        let posts = Bucket(Key<[Int]>("ensemble.posts")) { LocalSource { [1] } }
+        let feed = posts.resolving(\.self, from: names)
+        let child = Composition { Input(feed) } transform: { $0.related[1]?.name ?? "" }
+        let composition = Composition { Input(child) } transform: { $0 }
         let model = Consumer(composition)
         let data = model.data
         var received = model.updates.makeAsyncIterator()
         data.connect()
+
         await composition.load()
         while let update = await received.next() {
             if case .result(.success("name-1")) = update { break }
         }
         if case .available("name-1") = data.latestValue {} else { Issue.record("Expected resolved name") }
-        try await query.reset()
-        await service.setFailure(true)
-        await composition.load(using: .remote)
-        var sawReset = false
+
+        try await names.reset()
         while let update = await received.next() {
-            if case .reset = update { sawReset = true }
+            if case .reset = update { break }
+        }
+        if case .unavailable = data.latestValue {} else { Issue.record("Reset relationships must clear retained data") }
+
+        await service.setFailure(true)
+        await feed.load()
+        while let update = await received.next() {
             if case .result(.failure) = update { break }
         }
-        #expect(sawReset)
-        if case .unavailable = data.latestValue {} else { Issue.record("Reset relationships must clear retained data") }
+        if case .failure = data.phase {} else { Issue.record("Expected failure phase") }
+
         await service.setFailure(false)
-        await composition.load(using: .remote)
+        await feed.load()
         while let update = await received.next() {
             if case .result(.success("name-1")) = update { break }
         }
@@ -141,8 +141,6 @@ struct IntegrationTests {
     @MainActor @Test func bindingResetFailureAndRetry() async {
         let a = Source()
         let b = Source()
-        a.valueToLoad = 10
-        b.valueToLoad = 20
         let inner = Composition {
             Input(a)
             Input(b)
@@ -153,14 +151,19 @@ struct IntegrationTests {
         let composition = Composition {
             Input(middle)
         } transform: { $0 + 0 }
-        let model = Consumer(composition) { await composition.load(using: .remote) }
+        let model = Consumer(composition) {
+            a.update = .result(.success(10))
+            b.update = .result(.success(20))
+        }
         let data = model.data
         var received = model.updates.makeAsyncIterator()
         data.connect()
         for _ in 0..<20 { await Task.yield() }
         #expect(data.phase.kind == .empty)
         await composition.load()
-        // Loading can publish intermediate outcomes; wait for the final success.
+        #expect(data.phase.kind == .empty)
+        await data.reload()
+        // Wait for the observed values to reach the binding.
         while let update = await received.next() {
             if case .result(.success(30)) = update { break }
         }
@@ -220,37 +223,6 @@ private actor RelationshipService {
 }
 
 private nonisolated struct NamedEntry: Identifiable, Sendable { let id: Int; let name: String }
-
-/// Defines the query's entry lookup and invalidation at the repository boundary.
-@MainActor @Observable
-private final class EntryQuery: LoadableUpdateSource {
-    var latest: Update<NamedEntry> = .reset
-    private var generation: UInt = 0
-    private let names: IdentifiedBucket<NamedEntry>
-
-    init(names: IdentifiedBucket<NamedEntry>) { self.names = names }
-
-    func load(using policy: LoadPolicy) async {
-        generation &+= 1
-        let request = generation
-        do {
-            let entry = try await names.load(id: 1, using: policy)
-            guard generation == request, !Task.isCancelled else { return }
-            latest = .result(.success(entry))
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == request, !Task.isCancelled else { return }
-            latest = .result(.failure(error))
-        }
-    }
-
-    func reset() async throws {
-        generation &+= 1
-        latest = .reset
-        try await names.reset()
-    }
-}
 
 extension IntegrationTests {
     @MainActor @Test func partitionRetryKeepsViewDataLoading() async throws {

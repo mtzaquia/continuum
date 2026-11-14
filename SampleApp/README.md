@@ -1,20 +1,9 @@
-# Continuum Sample App
+# Continuum sample app
 
-Open `SampleApp.xcodeproj` and run the **SampleApp** scheme. The app links the
-parent folder as a local Swift package, so edits to `Sources/Continuum` are
-available immediately.
+Open [SampleApp.xcodeproj](SampleApp.xcodeproj) and run the `SampleApp` scheme on an iOS simulator. The project links the parent directory as a local Swift package.
 
-The sample is a guided lab rather than an application shell. Numbered
-experiment cards, state badges, and a live plain-language activity feed make it
-possible to follow each state transition while interacting with the library:
+- Load the catalog to see cached data followed by remote results and persistence. Inject a failure to see retained data and the operation error.
+- Edit the catalog with typed mutations, fetch the next page, or reset the snapshot and cache.
+- Switch shelves to see separate partition snapshots and loading state.
 
-- **Run the load pipeline** visualizes cache → remote → persistence and includes
-  controls for refreshes, failure injection, storage, and persisted resets.
-- **Inspect the atomic snapshot** exposes established state, value count,
-  mutations, errors, and cursor pagination together.
-- **Compare independent partitions** loads each shelf separately to show that
-  values and loading state remain scoped to their partition.
-
-`Continuum.debug = .trace` is enabled during app startup to make source,
-persistence, and pagination lifecycle events visible in the debug console.
-The UI test target covers the catalog pagination and a partition load.
+The app enables `Continuum.debug = .trace` for Console output. The UI tests cover catalog pagination and a partition load.

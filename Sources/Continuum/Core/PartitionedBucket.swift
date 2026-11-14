@@ -21,6 +21,9 @@
 //
 
 /// Selects an independently loaded bucket for each partition key.
+///
+/// Select and configure buckets on the main actor. Each bucket owns its
+/// snapshot, errors, and pagination.
 @MainActor
 public final class PartitionedBucket<Partition: Hashable & Sendable, Space: ContinuumKeySpace, Operation: Sendable> {
     /// The key space shared by the selected buckets.
@@ -29,7 +32,15 @@ public final class PartitionedBucket<Partition: Hashable & Sendable, Space: Cont
     private let configuration: @MainActor @Sendable (Partition) -> BucketConfiguration<Space, Operation>
     private var buckets: [Partition: Bucket<Space, Operation>] = [:]
 
-    /// Configures buckets lazily. Each bucket tracks freshness independently.
+    /// Creates a container that configures each bucket on first access.
+    ///
+    /// - Parameters:
+    ///   - keySpace: The key space shared by the selected buckets.
+    ///   - partitionedBy: The identity type used to select a bucket.
+    ///   - staleAfter: The freshness interval tracked independently by each
+    ///     bucket. Pass `nil` for unlimited reuse, or a nonnegative duration.
+    ///   - configuration: Builds the sources and optional mutation handler
+    ///     for the requested partition key.
     public init(
         _ keySpace: Space,
         partitionedBy _: Partition.Type,
@@ -43,7 +54,10 @@ public final class PartitionedBucket<Partition: Hashable & Sendable, Space: Cont
         self.configuration = configuration
     }
 
-    /// Returns the same bucket for equal keys. The container retains each selected bucket.
+    /// Returns the bucket for this key, creating it on first access.
+    ///
+    /// Equal keys share the same bucket. The container retains every selected
+    /// bucket until it is released.
     public subscript(partition: Partition) -> Bucket<Space, Operation> {
         if let bucket = buckets[partition] { return bucket }
         let bucket = Bucket(keySpace, staleAfter: staleAfter, configuration: configuration(partition))

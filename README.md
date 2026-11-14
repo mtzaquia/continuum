@@ -1,40 +1,24 @@
 # 🎞️ Continuum
 
-[![Tests](https://github.com/mtzaquia/continuum/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/mtzaquia/continuum/actions/workflows/tests.yml)
-[![Swift 6.3](https://img.shields.io/badge/Swift-6.3-orange.svg)](https://www.swift.org/)
-[![iOS 17+](https://img.shields.io/badge/iOS-17%2B-blue.svg)](https://github.com/mtzaquia/continuum/blob/main/Package.swift)
-![Class C](https://img.shields.io/badge/class-C-orange)
+Continuum is a Swift library for loading, observing, and combining typed snapshots.
 
-<a href="https://www.buymeacoffee.com/mtzaquia" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 30px !important;" ></a>
-
-`Continuum` manages typed snapshots in Swift: load from cache or network,
-observe changes, and combine related data into values your feature can use.
-
-A **bucket** owns one complete snapshot. A **partition** gives the same bucket
-shape independent snapshots for different keys. A **composition** combines
-current values and coordinates their loading.
+- A **bucket** owns one snapshot and its load, mutation, and reset operations. An indexed bucket can also load individual entries.
+- A **partitioned bucket** creates independent buckets by key, such as one list per account.
+- A **composition** derives one result from observable inputs and coordinates loads across Continuum sources. Apps and other libraries can supply their own inputs through the public `UpdateSource` protocol.
 
 ## Install
 
-Requires Swift 6.3, iOS 17+ or macOS 14+. Add the package dependency below
-and the `Continuum` product to your target:
+Continuum 2.0 requires Swift 6.3 and supports iOS 17+ and macOS 14+. Pin the prerelease in Swift Package Manager and link the `Continuum` product to your target.
 
 ```swift
-.package(url: "https://github.com/mtzaquia/continuum.git", from: "1.1.0")
+.package(url: "https://github.com/mtzaquia/continuum.git", exact: "2.0.0-beta.9")
 ```
 
-Version 1.1.0 includes compositions, direct iteration, and snapshot freshness.
-When upgrading from 1.0.x, review the [migration notes](https://github.com/mtzaquia/continuum/releases/tag/v1.1.0)
-for observation-protocol and sendable key-path changes.
-
-For the upcoming 2.0.0 release, see the [unreleased notes](CHANGELOG.md)
-and [2.0.0 migration guide](docs/migrating-to-2.md).
+In Xcode, add the same repository URL and choose **Exact Version** with `2.0.0-beta.9`. See the [prerelease notes](https://github.com/mtzaquia/continuum/releases/tag/v2.0.0-beta.9), [1.1 documentation](https://github.com/mtzaquia/continuum/tree/v1.1.0), or [migration guide](docs/migrating-to-2.md).
 
 ## Five-minute start
 
-Use `Key<Value>` for a single value or `IndexedKey<ID, Value>` for an ordered
-collection. Buckets and compositions are main-actor isolated; source closures
-are sendable asynchronous operations.
+Use `Key<Value>` for one value or `IndexedKey<ID, Value>` for an ordered collection. In this example, a bucket loads posts and a composition turns them into titles. Replace the example `RemoteSource` closure with your client call.
 
 ```swift
 import Continuum
@@ -45,113 +29,40 @@ nonisolated struct Post: Identifiable, Sendable {
 }
 
 @MainActor
-func example() async throws {
+func showPostTitles() async {
   let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
-    LocalSource { nil }
     RemoteSource { [Post(id: 1, title: "Hello, Continuum")] }
   }
-
-  try await posts.load()
-  print(posts.values)       // Complete ordered snapshot.
-  print(posts[1]?.title)    // One indexed value.
-
-  try await posts.mutate { mutation in
-    try await mutation.update { posts in
-      posts.filter { $0.id != 1 } + [Post(id: 2, title: "Another post")]
-    }
+  let titles = Composition { Input(posts) } transform: { posts in
+    posts.map(\.title)
   }
-}
-```
 
-Retain buckets in a repository or feature owner. Replace the example closures
-with your database and client calls. A local source returns `nil` on a miss;
-an empty array is a successful snapshot. `isLoaded` distinguishes that success
-from a bucket that has never loaded.
+  await titles.load()
 
-The default `.cached` policy returns memory or tries local sources before
-remote. Use `.cachedThenRemote` to show cache while refreshing, or `.remote`
-to wait for pending writes and fetch straight from the server. Add
-`staleAfter: .seconds(300)` to a bucket initializer to have cached snapshot
-loads refresh stale data while keeping existing values readable.
-[Choose a loading policy →](docs/loading.md)
-
-An established snapshot stays available as a successful `latest` after a failed
-refresh or rollback. Observe `error` or `state.error` for the operation failure.
-A `.cached` memory hit returns the retained value and preserves the error.
-
-### Declare repository properties
-
-Use the upcoming release's bucket aliases in repository properties and
-protocol requirements.
-
-```swift
-@MainActor
-protocol PostRepository {
-  var posts: IdentifiedBucket<Post> { get }
-  var featured: ValueBucket<Post> { get }
-  var postsByTopic: PartitionedIdentifiedBucket<String, Post> { get }
-  var topicNames: PartitionedValueBucket<String, [String]> { get }
-}
-```
-
-`IdentifiedBucket` and `PartitionedIdentifiedBucket` infer the index type from
-the model's `Identifiable.ID`. For a custom index, use `IndexedBucket<Index, Value>`
-or `PartitionedIndexedBucket<Partition, Index, Value>` with an `indexedBy:` key.
-
-For a bucket with a typed `Mutate` handler, use the corresponding `Mutable`
-alias and pass the operation type last. For example, use
-`MutableIdentifiedBucket<Card, CardOperation>` or
-`PartitionedMutableIdentifiedBucket<ProfileID, Card, CardOperation>`.
-[Typed mutation aliases →](docs/remote-mutations.md#annotate-a-typed-bucket)
-
-## Observe and combine
-
-Buckets, selected partitions, and compositions expose an observable `latest`
-outcome and support direct asynchronous iteration:
-
-```swift
-let titles = Composition {
-  Input(posts)
-} transform: { posts in
-  posts.map(\.title)
-}
-
-await titles.load()
-let current = titles.latest
-let error = titles.error
-
-for await update in titles {
-  switch update {
-  case .result(.success(let titles)): print(titles)
+  switch titles.latest {
+  case .result(.success(let value)): print(value)
   case .result(.failure(let error)): print(error)
-  case .reset: break // Clear previously displayed data.
+  case .reset: break
   }
 }
 ```
 
-Add `Input` declarations to combine sources. Inputs are required by default;
-`.optional()` supplies nil when unavailable or failed. `titles.load()` loads
-each loadable source with `.cached` by default. Use `Input(source, loads: false)` to
-observe an input without loading it through the composition.
-Observe `error` for current input and transform errors, including failed
-refreshes with retained data. The default `CompositionError` lists them in
-input order.
-[Build a live composition →](docs/composition.md)
+Call `load()` to start work. Read `latest` under Swift Observation or iterate the bucket or composition with `for await`. A failed refresh can leave a usable snapshot in `latest` and report the failure through `error`. Retain the bucket in your repository and the composition for as long as its derived value is needed.
 
-## Guides
+## Documentation
 
-| I want to… | Read |
-| --- | --- |
-| Load snapshots or individual indexed entries | [Loading](docs/loading.md) |
-| Combine buckets, queries, and observable values | [Compositions](docs/composition.md) |
-| Keep independent snapshots for different keys | [Partitioning](docs/partitioning.md) |
-| Save snapshots to local storage | [Persistence](docs/persistence.md) |
-| Edit snapshots and send mutations to a server | [Remote mutations](docs/remote-mutations.md) |
-| Fetch and merge subsequent pages | [Pagination](docs/pagination.md) |
-| Clear stale data | [Invalidation](docs/invalidation.md) |
-| Understand cancellation and overlapping work | [Operation ordering](docs/operation-ordering.md) |
-| Manage retention and observation costs | [Resource lifetime](docs/resource-lifetime.md) |
-| Inspect loading and mutation activity | [Diagnostics](docs/diagnostics.md) |
+- [Load snapshots and entries](docs/loading.md) and choose a cache policy.
+- [Partition a bucket](docs/partitioning.md) by account, filter, or another identity.
+- [Compose live values](docs/composition.md), resolve related entries, or [observe an external source](docs/composition.md#observe-an-external-source).
+- [Paginate a bucket](docs/pagination.md) and retry a failed page.
+- [Persist snapshots](docs/persistence.md), [apply optimistic mutations](docs/remote-mutations.md), or [reset invalid data](docs/invalidation.md).
+- [Understand ordering and cancellation](docs/operation-ordering.md), [manage lifetime](docs/resource-lifetime.md), and [inspect diagnostics](docs/diagnostics.md).
+
+## Sample app
+
+Open [SampleApp.xcodeproj](SampleApp/SampleApp.xcodeproj) and run the `SampleApp` scheme on an iOS simulator. The [sample](SampleApp/README.md) shows cached-then-remote loading, mutation rollback, paging, and independent partitions.
+
+[Support Continuum](https://www.buymeacoffee.com/mtzaquia)
 
 ## License
 

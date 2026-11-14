@@ -26,7 +26,7 @@
 /// independent. A refresh or reset can therefore fail while
 /// ``isLoaded`` remains `true`.
 public struct LoadState: Sendable {
-    /// Whether source work is currently active.
+    /// Whether a full snapshot load is active.
     public let isLoading: Bool
 
     /// Whether the bucket has established a complete snapshot.

@@ -1,9 +1,27 @@
-import Continuum
+@testable import Continuum
 import Observation
 import Testing
 
 @Suite("Bucket composition", .timeLimit(.minutes(1)))
 struct CompositionTests {
+    @Test("Composition load publishes changed input before returning and leaves a cache hit alone")
+    func loadObservesOnlyChangedInputs() async {
+        let bucket = Bucket(Key<Int>("composition.cached-transform")) { LocalSource { 2 } }
+        var transforms = 0
+        let composition = Composition { Input(bucket) } transform: { value in
+            transforms += 1
+            return value * 2
+        }
+
+        await composition.load()
+        #expect(success(composition.latest) == 4)
+        #expect(transforms == 1)
+
+        await composition.load()
+        #expect(success(composition.latest) == 4)
+        #expect(transforms == 1)
+    }
+
     @Test("Concrete bucket values, partitions and observable values reach the transform")
     func concreteInputs() async throws {
         let user = Bucket(Key<String>("composition.user")) { LocalSource { "Sam" } }
@@ -1047,11 +1065,11 @@ private final class QuerySource<Value: Sendable>: LoadableUpdateSource {
         self.fetch = fetch
     }
 
-    func load(using policy: LoadPolicy) async {
+    func load(in context: SourceLoadContext) async {
         generation &+= 1
         let request = generation
         do {
-            let value = try await fetch(policy)
+            let value = try await fetch(context.policy)
             guard generation == request, !Task.isCancelled else { return }
             latest = .result(.success(value))
         } catch {

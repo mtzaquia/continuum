@@ -21,13 +21,14 @@
 //
 
 import Observation
+import os
 
-/// A coherent result or unavailable state published by a bucket or composition.
+/// The result or unavailability reported by an observable source.
 nonisolated public enum Update<Snapshot: Sendable>: Sendable {
-    /// An available snapshot or a failure of the source's current outcome.
+    /// An available snapshot or a failure that prevents a result.
     case result(Result<Snapshot, any Error>)
 
-    /// The observed state is unavailable.
+    /// The source has yet to produce a result or has cleared it.
     case reset
 }
 
@@ -38,14 +39,23 @@ extension Update {
     }
 }
 
-/// An observable snapshot and its source-owned error.
+/// The public observation contract for inputs to a composition.
+///
+/// Continuum's buckets, resolved buckets, and compositions conform to this
+/// protocol. Apps and other libraries can conform their own observable classes
+/// and pass them to ``Input``. The source owns its loading, reset, and subscription
+/// lifecycle.
 @MainActor
 public protocol UpdateSource<Snapshot>: AnyObject, Observable {
+    /// The value published when the source succeeds.
     associatedtype Snapshot: Sendable
 
     /// The current snapshot, failure, or unavailability.
     var latest: Update<Snapshot> { get }
-    /// An operation error that can coexist with an available snapshot.
+    /// An observable operation error that can coexist with an available snapshot.
+    ///
+    /// The default is `nil`. Publish a failure that prevents an available
+    /// snapshot through ``latest``.
     var error: (any Error)? { get }
 }
 
@@ -62,13 +72,66 @@ protocol CompositionResetSource: AnyObject {
 /// A source that can participate in a composition load. Publish failures through
 /// `latest` or `error` so all observers see the same outcome.
 @MainActor
-public protocol LoadableUpdateSource<Snapshot>: UpdateSource, Sendable {
-    /// The value returned to direct callers of a load.
-    associatedtype LoadResult
+protocol LoadableUpdateSource<Snapshot>: UpdateSource, Sendable {
+    func load(in context: SourceLoadContext) async
+}
 
-    /// Loads using the requested policy and publishes the outcome before returning.
-    @discardableResult
-    func load(using policy: LoadPolicy) async throws -> LoadResult
+/// Shares dependent loads for the duration of a single top-level load.
+final class SourceLoadContext: Sendable {
+    private struct State: Sendable {
+        var isCancelled = false
+        var loads: [ObjectIdentifier: Task<Void, Never>] = [:]
+    }
+
+    let policy: LoadPolicy
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    private init(policy: LoadPolicy) { self.policy = policy }
+
+    @MainActor
+    static func load(_ source: any LoadableUpdateSource, using policy: LoadPolicy) async {
+        let context = Self(policy: policy)
+        await withTaskCancellationHandler {
+            await source.load(in: context)
+        } onCancel: {
+            context.cancel()
+        }
+    }
+
+    @MainActor
+    func loadAll(_ sources: [any LoadableUpdateSource]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for source in sources {
+                group.addTask { await self.load(source) }
+            }
+        }
+    }
+
+    @MainActor
+    func load(_ source: any LoadableUpdateSource) async {
+        guard !Task.isCancelled else { return }
+        let id = ObjectIdentifier(source)
+        let task = state.withLock { state -> Task<Void, Never>? in
+            guard !state.isCancelled else { return nil }
+            if let task = state.loads[id] { return task }
+            let task = Task { @MainActor in
+                guard !Task.isCancelled else { return }
+                await source.load(in: self)
+            }
+            state.loads[id] = task
+            return task
+        }
+        await task?.value
+    }
+
+    private func cancel() {
+        // The top-level call owns shared work, even if an individual branch stops waiting.
+        let tasks = state.withLock { state in
+            state.isCancelled = true
+            return state.loads.values
+        }
+        for task in tasks { task.cancel() }
+    }
 }
 
 func makeSourceObservation<Source: UpdateSource & Sendable>(

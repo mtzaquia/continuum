@@ -53,7 +53,7 @@ nonisolated public struct IndexedKey<
 
     /// Creates a typed indexed key using an identifiable value's `id`.
     ///
-    /// The ``Identifiable`` conformance must be nonisolated because buckets
+    /// The `Identifiable` conformance must be nonisolated because buckets
     /// derive indices from sendable source results. In a target with default
     /// `MainActor` isolation, declare the domain value itself `nonisolated`.
     /// The namespace must not be empty, and the version must be greater than

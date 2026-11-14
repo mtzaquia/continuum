@@ -26,7 +26,11 @@ public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
     let loadSource: (any LoadableUpdateSource)?
 
-    /// Observes the source. Pass `loads: false` to read it without forwarding loads.
+    /// Observes a Continuum or external ``UpdateSource``.
+    ///
+    /// By default, composition loads also load buckets, resolved buckets, and
+    /// nested compositions. Set `loads` to `false` to skip loading through this
+    /// input. Call an external source's operations directly.
     public init(_ source: any UpdateSource<Value>, loads: Bool = true) {
         let resetSource = source as? any CompositionResetSource
         read = {

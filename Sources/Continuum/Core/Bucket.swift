@@ -303,7 +303,7 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
         LoadState(isLoading: loading, isLoaded: isLoaded, error: operationError)
     }
 
-    /// Whether source work is currently active for this bucket.
+    /// Whether a full snapshot load is active for this bucket.
     public var isLoading: Bool {
         loading
     }
@@ -436,7 +436,12 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
         }
     }
 
-    /// Runs an operation in this partition's mutation queue.
+    func load(in context: SourceLoadContext) async {
+        // The bucket publishes operation failures for observers.
+        _ = try? await load(using: context.policy)
+    }
+
+    /// Runs an operation in this bucket's mutation queue.
     ///
     /// The handler can publish and persist an optimistic edit before calling
     /// a service. A failure rolls back owned edits. Reset cancels queued
@@ -457,8 +462,7 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
         try await finish(queued)
     }
 
-    /// Forgets the current snapshot, pagination state, and writable local
-    /// snapshots, returning the partition to its initial state.
+    /// Clears the snapshot, error, freshness, pagination, and writable local data.
     ///
     /// Reset differs from an established empty indexed snapshot: reset makes
     /// ``isLoaded`` false, while a loaded `[]` is a known successful snapshot.
@@ -1018,7 +1022,7 @@ private extension Bucket {
                         count: keySpace.values(in: snapshot).count
                     )
                 )
-                return snapshot
+                return keySpace.normalized(snapshot)
             }
             continuumDebug(
                 .localSourceMissed(
@@ -1054,9 +1058,7 @@ private extension Bucket {
     private func resolve(_ initialFlight: InFlight) async throws -> LoadOutcome {
         var flight = initialFlight
         while true {
-            let result = await flight.task.result.map { outcome in
-                LoadOutcome(snapshot: keySpace.normalized(outcome.snapshot), origin: outcome.origin, nextPage: outcome.nextPage)
-            }
+            let result = await flight.task.result
             guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
             guard generation == flight.generation else {
                 if let replacement = completedReplacement(for: flight.generation) {
@@ -1140,7 +1142,7 @@ private extension Bucket {
             return
         }
 
-        publish(.result(.success(keySpace.normalized(snapshot))))
+        publish(.result(.success(snapshot)))
         if let operationID = inFlight?.operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 continuumDebug(
@@ -1375,15 +1377,15 @@ private extension Bucket {
 
 
 extension Bucket: AsyncSequence {
-    /// The result or reset emitted by this partition.
+    /// The result or reset emitted by this bucket.
     public typealias Element = Update<Space.Snapshot>
 
     /// Observes outcomes without starting a load.
     ///
     /// Each iterator receives the current result if one exists. Initial
     /// unavailability is silent. A reset clears a previous result while the
-    /// partition remains unavailable. Changes may coalesce. Each iterator has
-    /// an independent, unbounded buffer and retains its partition until cancelled
+    /// bucket remains unavailable. Changes may coalesce. Each iterator has
+    /// an independent, unbounded buffer and retains its bucket until cancelled
     /// or released.
     nonisolated public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(observation: makeSourceObservation(self))

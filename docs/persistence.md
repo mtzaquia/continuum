@@ -1,6 +1,6 @@
-# Persist local snapshots
+# Persist snapshots locally
 
-Add `persist:` when a local source can replace its stored snapshot:
+A `LocalSource` can read an entire snapshot and optionally replace it. Continuum runs the closures you supply, so storage format, location, and schema belong to the app.
 
 ```swift
 let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
@@ -13,39 +13,20 @@ let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
 }
 ```
 
-Both closures work with the complete `Snapshot?`. `nil` means absent or deleted;
-`[]` is a successfully loaded empty collection. Continuum owns no storage driver
-or schema migration layer.
+The read returns `nil` on a cache miss. The write receives `nil` to delete the stored snapshot. An empty array represents a present collection. Omit `persist:` for a read-only source.
 
 ## Know when writes happen
 
-| Operation | Publication and persistence |
+| Operation | Order |
 | --- | --- |
 | Remote load or next page | Persist the complete normalized snapshot, then publish it. |
-| Snapshot edit in `mutate` | Publish optimistically, persist locally, then run the paired endpoint. |
-| Authoritative mutation response | Apply the returned entry or snapshot, publish it, then persist the complete snapshot. |
-| `reset` | Clear memory and pagination, then persist `nil`. |
-
-A remote-only mutation and an edit skipped for unavailable data write no
-snapshot. Pages persist the full accumulated snapshot. Coalesced loads share persistence
-work. Read-only local sources omit `persist:` and receive no writes.
+| Entry load for an existing member | Persist the complete list with the replaced entry, then publish it. |
+| Optimistic edit | Publish, persist, then run the paired endpoint. |
+| Authoritative mutation response | Publish the reconciled snapshot, then persist it. |
+| `reset()` | Clear memory and pagination, then persist `nil`. |
 
 ## Use several writable destinations
 
-A bucket accepts multiple `LocalSource` declarations. Reads try them in order
-until one returns a snapshot. Writes visit every writable source in declaration
-order and stop at the first error.
+Reads try local sources in declaration order until a hit. Writes visit each writable source in declaration order and stop at the first error. If a load or page write fails, the candidate stays out of memory and earlier destinations may already have committed it. If a mutation or reset fails while it still owns the snapshot, Continuum restores memory and attempts to restore each writable source, reporting the original error.
 
-A failed remote load or page does not publish its candidate; completed writes
-are not rolled back. A failed mutation or reset restores its previous memory
-snapshot, if it still owns the state, and attempts to restore all writable
-sources. Restoration can also fail; the original error is reported.
-
-These destinations do not form a transaction. Shared backing stores must
-coordinate writes from other buckets or direct callers themselves.
-
-Local reads and writes are serialized per partition, including across resets.
-See [Operation ordering](operation-ordering.md) for cancellation and the rules
-for calling back into a bucket from its source closures.
-
-Next: [Remote mutations](remote-mutations.md) · [Invalidation](invalidation.md)
+Local reads and writes are serialized per bucket across suspension points. Each backing store must coordinate writes from different buckets or other callers. [Operation ordering](operation-ordering.md)

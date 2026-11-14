@@ -44,4 +44,4 @@ Optional diagnostics are compiled out of Release builds. Loading a bucket with
 no sources always emits a warning; its normal loading and error behavior is
 unchanged by the diagnostic level.
 
-Next: [Loading](loading.md) · [Operation ordering](operation-ordering.md)
+[Loading](loading.md) · [Operation ordering](operation-ordering.md)

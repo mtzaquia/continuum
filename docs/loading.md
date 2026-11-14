@@ -1,63 +1,26 @@
 # Load snapshots
 
-Choose a policy on one bucket or selected partition. A bucket load returns its
-complete snapshot or throws; loading does not discard established values.
+Call `try await bucket.load(using:)` on a bucket or selected partition. The call returns the complete snapshot. Read `latest` to observe intermediate values as they become available.
 
-```swift
-let posts = try await repository.posts.load(using: .cachedThenRemote)
-```
-
-| Policy | Behavior |
+| Policy | Snapshot loading |
 | --- | --- |
-| `.cached` (default) | Return established memory unless `staleAfter` requires remote validation. Otherwise try local sources in order, then remote. Callers requiring source work share it. |
-| `.cachedThenRemote` | Expose memory or the first local hit, then always reach remote. Return the remote snapshot. Concurrent callers share work. |
-| `.remote` | Wait for mutations and resets, skip cache, and replace active reads with a new remote flight. The latest flight wins. |
+| `.cached` (default) | Return fresh memory, otherwise try local sources in order and fall through to remote on a miss. Configured freshness can require remote validation. |
+| `.cachedThenRemote` | Expose memory or the first local hit while fetching remotely. A successful call returns the remote snapshot. |
+| `.remote` | Wait for pending mutations and resets, then skip cache and replace active reads. |
 
-A local `nil` is a miss; an empty collection is a hit. A local error stops the
-load. Both remote-reaching policies require a `RemoteSource`.
+A local source returns `nil` on a miss. An empty collection is a hit. A local read error throws and stops the load. If a load needs remote data and no `RemoteSource` is configured, it throws `ContinuumError.missingRemoteSource`.
 
 ## Refresh stale snapshots
 
-Set `staleAfter` to make cached snapshot loads refresh data after a duration:
+Pass `staleAfter: .seconds(300)` to `Bucket` or `PartitionedBucket`. Freshness starts when a successful full remote snapshot enters memory, after persistence. The first cached load can publish a local hit before validating it remotely. Once stale, the next cached load shares a refresh while keeping existing data readable.
 
-```swift
-let posts: IdentifiedBucket<Post> = Bucket(
-  IndexedKey("posts"),
-  staleAfter: .seconds(300)
-) {
-  LocalSource { try await database.posts() }
-  RemoteSource { try await client.posts() }
-}
-
-try await posts.load()
-```
-
-Omitting the parameter, or passing `nil`, preserves unlimited cache reuse.
-Durations must be nonnegative. `.zero` requires remote validation on every
-cached snapshot load. Local-only buckets ignore freshness.
-Partitioned buckets accept `staleAfter` after `partitionedBy:`; each selected
-partition tracks its own interval.
-
-Freshness starts when a successful full remote snapshot finishes persistence
-and enters memory. At or after the duration, the next `.cached` load awaits a
-shared remote refresh while existing values remain readable and `isLoaded`
-stays true. Failed refreshes preserve those values, report the error, and leave
-the snapshot eligible for retry on the next cached load.
-
-Local snapshots have no age metadata. With freshness enabled and a remote
-source configured, the first cached load exposes the first local hit, then
-validates it remotely before returning. Freshness is tracked only for the
-current partition lifetime and is not persisted across launches.
-
-Expiration itself starts no work, clears no data, and evicts no partitions.
-Only successful full remote loads restart the interval. Mutations, entry loads,
-and subsequent pages do not renew collection freshness. Reset clears freshness;
-a failed reset restores the original interval with the previous snapshot.
-`.cachedThenRemote` and `.remote` always retain their existing behavior.
+- `nil` (default) allows indefinite cache reuse. `.zero` requires validation on every cached load. Durations must be nonnegative. Local-only buckets ignore this setting.
+- Each partition tracks freshness in memory. Only a successful full remote load renews it. Reset clears it, and a failed reset restores the previous interval.
+- A failed refresh leaves stale data eligible for the next retry. Expiration takes effect on the next load.
 
 ## Load one indexed entry
 
-Pass a `loadEntry` closure that receives an ID when configuring the remote source.
+Configure `loadEntry:` beside the complete snapshot loader.
 
 ```swift
 let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
@@ -67,74 +30,23 @@ let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
   )
 }
 
-let author = try await authors.load(id: authorID, using: .remote)
+let author = try await authors.load(id: authorID)
 ```
 
-`.cached` returns an existing entry or fetches it. `.cachedThenRemote` and
-`.remote` fetch while keeping existing values readable. `.remote` supersedes
-earlier fetches for the same ID; other policies share work. Different IDs fetch
-concurrently. Entry loads do not scan local sources.
-`staleAfter` applies to complete snapshot loads; entry loads keep these policies
-and have no independent freshness interval.
+`.cached` accepts an existing entry. On a miss, it uses `loadEntry` directly. `.cachedThenRemote` and `.remote` fetch remotely. Different IDs can load concurrently. Fetches for the same ID share work until a `.remote` request replaces them.
 
-An entry already in the collection is replaced in place and persisted before
-publication. An absent entry is returned without insertion or persistence.
-Entry loading preserves ordering, pagination, and whole-list `isLoading` and
-`isLoaded`. The returned index must match the request. Entry failures throw and
-set `error` while preserving the collection outcome. Starting another entry
-fetch clears the error. A cached entry hit preserves it.
-Reset and superseding collection operations cancel pending entry work.
+A fetched entry must match its requested ID. If it is already in the collection, Continuum updates it in place and persists the complete list. An absent entry is returned to the caller only. An entry failure throws and sets `error` while preserving `latest`.
 
 ## Read loading state
 
-- `isLoaded` indicates an established complete snapshot, including an empty one.
-- `isLoading` tracks active collection loads, including refreshes.
-- `error` and `state.error` expose the latest collection load, entry load,
-  mutation, persistence, or invalidation error. Read `nextPageError` for a
-  failed continuation.
-- `latest` and iteration report snapshot availability. An established snapshot
-  is `.result(.success(snapshot))`. A collection load failure without a
-  snapshot is `.result(.failure(error))`. Reset clears availability.
+| Property | Use |
+| --- | --- |
+| `latest` | Render a success, handle a failure when no snapshot is available, or clear on `.reset`. |
+| `isLoaded` | Tell an established snapshot, including an empty array, from an unavailable one. |
+| `isLoading` | Track full snapshot loading, including refreshes. |
+| `error` or `state.error` | Observe collection, entry, mutation, persistence, or invalidation errors. |
+| `pagination` | Track continuation progress and page errors. |
 
-A failed refresh throws to its caller and leaves the established snapshot
-available to existing and new observers. If a mutation or reset rolls back,
-observers receive the restored snapshot when one existed. A collection retry
-preserves the current error until it succeeds or fails again, including while
-displaying an interim cached snapshot. A cached memory hit preserves the
-error. An entry fetch, mutation, or reset clears it.
-Successful remote loads finish local persistence before publishing.
-[Persistence details →](persistence.md)
+A failed refresh throws and keeps any established snapshot as a success in `latest`. During a collection retry, the prior error stays visible until the load settles, even if an intermediate cache hit publishes a snapshot. A cached memory hit that starts no load preserves the error. Use `.remote` to explicitly refresh established data. [Pagination](pagination.md) · [Operation ordering](operation-ordering.md)
 
-Use a `LocalSource` to load an initial in-memory snapshot. Calling `load()`
-on a bucket without sources warns and throws `missingRemoteSource`.
-
-## Coordinate concurrent work
-
-Cached loading without fresh memory waits for pending mutations and resets
-before checking again. Both remote-reaching policies also wait for these
-operations. A cached call with fresh memory returns immediately, even during
-a refresh.
-
-If `.cachedThenRemote` joins a cached flight that resolves locally, the shared
-flight continues to remote. Callers still awaiting it receive the remote result.
-An awaiting caller's cancellation does not cancel a shared bucket flight.
-[Complete ordering and cancellation rules →](operation-ordering.md)
-
-## Load through a composition
-
-```swift
-let feed = Composition {
-  Input(repository.posts)
-} transform: { $0 }
-
-await feed.load(using: .remote)
-```
-
-Each loadable source receives the requested policy once per composition load,
-including across nested branches. Use `Input(repository.posts, loads: false)`
-for observation alone. Independent sources load concurrently. An available
-bucket snapshot continues to contribute its value after a failed refresh.
-Observe `composition.error` to present that failure.
-[Composition loading →](composition.md#load-the-composition)
-
-Next: [Persistence](persistence.md) · [Compositions](composition.md)
+To load several sources together, use [`Composition.load(using:)`](composition.md#load-the-composition).
