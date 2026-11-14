@@ -350,7 +350,8 @@ public final class BucketPartition<Space: ContinuumKeySpace, Operation: Sendable
     ///
     /// An established snapshot remains a success when an operation fails. Read
     /// ``error`` for the operation failure. A collection load can publish a
-    /// failure when no snapshot is available.
+    /// failure when no snapshot is available. Starting a retry preserves that
+    /// outcome until the load publishes a new result or the partition is reset.
     public var latest: Update<Space.Snapshot> { latestUpdate }
 
     /// Loads and atomically publishes the complete snapshot.
@@ -1232,13 +1233,7 @@ private extension BucketPartition {
     private func start(_ flight: InFlight) {
         inFlight = flight
         completedFlight = nil
-        let state = LoadState(isLoading: true, isLoaded: loadState.isLoaded)
-        if case .result(.failure) = latestUpdate {
-            publishStreamState { loadState = state }
-        } else {
-            // Loading bookkeeping alone must not duplicate a success update.
-            loadState = state
-        }
+        loadState = LoadState(isLoading: true, isLoaded: loadState.isLoaded)
     }
 
     func nextGeneration() -> UInt {

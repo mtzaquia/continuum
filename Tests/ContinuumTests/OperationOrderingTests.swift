@@ -266,39 +266,65 @@ struct OperationOrderingTests {
         #expect(bucket.value == 9)
     }
 
-    @Test("A new subscription during retry does not replay a cleared error")
-    func retryClearsStreamFailure() async throws {
-        let gate = OperationGate<Int>()
-        enum Failure: Error { case expected }
-        let bucket = Bucket(Key<Int>("ordering.retry")) { RemoteSource { await gate.wait() } }
-        await #expect(throws: Failure.self) {
-            try await bucket.mutate { mutation in
-                try await mutation.update { _ in 1 } remote: {
-                    throw Failure.expected
-                }
-            }
+    @Test("A partition retry preserves its failure until it settles", arguments: [false, true])
+    func retryPreservesStreamFailure(retryFails: Bool) async throws {
+        enum Failure: Error { case initial, retry }
+        let gate = OperationGate<Result<Int, Failure>>()
+        let bucket = Bucket(Key<Int>("ordering.retry"), partitionedBy: String.self) { _ in
+            RemoteSource { try await gate.wait().get() }
         }
-        let refresh = Task { try await bucket.load(using: .remote) }
+        let partition = bucket["selected"]
+        let composition = Composition { Input(partition) } transform: { $0 }
+        let firstLoad = Task { await composition.load(using: .remote) }
         await gate.started()
-        #expect(bucket.error == nil)
-        // This is the same current state that the public stream observes.
-        guard case .reset = bucket.latest else {
-            await gate.finish(9)
-            _ = try await refresh.value
-            Issue.record("Expected unavailable state after clearing the failure")
+        await gate.finish(.failure(.initial))
+        await firstLoad.value
+
+        var updates = composition.makeAsyncIterator()
+        guard case .result(.failure)? = await updates.next() else {
+            Issue.record("Expected the initial failure")
             return
         }
-        let consumer = Task {
-            var iterator = bucket.makeAsyncIterator()
-            return await iterator.next()
+
+        let retry = Task { await composition.load(using: .remote) }
+        await gate.started()
+        #expect(partition.isLoading)
+        #expect(partition.error == nil)
+        if case .result(.failure(let error)) = partition.latest {
+            #expect(error as? Failure == .initial)
+            var joinedDuringRetry = partition.makeAsyncIterator()
+            if case .result(.failure(let replayed))? = await joinedDuringRetry.next() {
+                #expect(replayed as? Failure == .initial)
+            } else {
+                Issue.record("Expected a new partition subscriber to receive the previous failure")
+            }
+        } else {
+            Issue.record("Expected the partition to retain its failure during retry")
         }
-        await Task.yield()
-        await gate.finish(9)
-        _ = try await refresh.value
-        guard case .result(.success(9))? = await consumer.value else {
-            Issue.record("Expected the refreshed result, not the old error")
+        let retainedError = composition.error as? CompositionError
+        #expect(retainedError?.errors.first as? Failure == .initial)
+
+        await gate.finish(retryFails ? .failure(.retry) : .success(9))
+        await retry.value
+        switch await updates.next() {
+        case .result(.failure(let error as CompositionError))? where retryFails:
+            #expect(error.errors.first as? Failure == .retry)
+        case .result(.success(9))? where !retryFails:
+            #expect(composition.error == nil)
+        default:
+            Issue.record("Expected the retry outcome without an intervening reset")
             return
         }
+
+        var resetUpdates = composition.makeAsyncIterator()
+        _ = await resetUpdates.next()
+        try await partition.reset()
+        guard case .reset? = await resetUpdates.next() else {
+            Issue.record("Expected an explicit reset to clear the retry outcome")
+            return
+        }
+        #expect(partition.error == nil)
+        #expect(composition.error == nil)
     }
 }
 

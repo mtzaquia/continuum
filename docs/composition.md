@@ -100,7 +100,8 @@ current result if present; initial and repeated unavailability stay silent.
 
 Failures do not end observation. A throwing transform produces a failure with
 the mapped error. A retained bucket snapshot supplies its value to required and
-optional inputs.
+optional inputs. When a bucket has only a failure, starting a retry keeps that
+outcome visible until a new result arrives or the bucket is reset.
 
 If a required reset accompanies a failure, the composition emits reset first
 so consumers can clear invalid retained data. Reset history from buckets and

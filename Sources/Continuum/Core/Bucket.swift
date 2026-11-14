@@ -248,7 +248,8 @@ public extension Bucket where Scope == UnpartitionedBucketScope {
     ///
     /// An established snapshot remains a success when an operation fails. Read
     /// ``error`` for the operation failure. A collection load can publish a
-    /// failure when no snapshot is available.
+    /// failure when no snapshot is available. Starting a retry preserves that
+    /// outcome until the load publishes a new result or the bucket is reset.
     var latest: Update<Space.Snapshot> { storage.latest }
 
     /// Loads and atomically publishes the complete snapshot.
