@@ -1052,7 +1052,7 @@ private func isFailure<T>(_ update: Update<T>?) -> Bool {
 }
 
 @MainActor @Observable
-private final class QuerySource<Value: Sendable>: LoadableUpdateSource {
+private final class QuerySource<Value: Sendable>: UpdateSource, LoadableSource {
     private(set) var latest: Update<Value>
     private var generation: UInt = 0
     private let fetch: @MainActor (LoadPolicy) async throws -> Value

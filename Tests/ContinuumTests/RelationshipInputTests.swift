@@ -2,8 +2,61 @@ import Continuum
 import Observation
 import Testing
 
-@Suite("Resolved buckets", .timeLimit(.minutes(1)))
-struct ResolvedBucketTests {
+@Suite("Relationship inputs", .timeLimit(.minutes(1)))
+struct RelationshipInputTests {
+    @Test("An indexed partition can supply an optional relationship from memory without an entry loader")
+    func resolvesFromLocalPartition() async throws {
+        let posts = Bucket(Key<[Post]>("relationship.local.posts")) {
+            LocalSource { [Post(authorID: 1)] }
+            RemoteSource { throw LookupFailure.offline }
+        }
+        let authors = PartitionedBucket(IndexedKey<Int, Author>("relationship.local.authors"), partitionedBy: Int.self) { _ in
+            LocalSource { [Author(id: 1, name: "Local")] }
+        }[0]
+        try await posts.load()
+        try await authors.load()
+
+        let includeAuthors = true
+        let screen = Composition {
+            if includeAuthors {
+                Input(posts, loads: false).resolving(\.authorID, from: authors)
+            }
+        } transform: { (resolved: ResolvedSnapshot<Post, Int, Author>?) in
+            resolved?.related[1]?.name
+        }
+
+        await screen.load(using: .remote)
+        #expect(snapshot(screen.latest) == "Local")
+        #expect(screen.error == nil)
+        #expect(posts.error == nil)
+    }
+
+    @Test("A missing related entry requires an entry loader")
+    func missingEntryLoader() async throws {
+        let posts = Bucket(Key<[Post]>("relationship.missing.posts")) {
+            LocalSource { [Post(authorID: 2)] }
+        }
+        let authors = Bucket(IndexedKey<Int, Author>("relationship.missing.authors")) {
+            LocalSource { [Author(id: 1, name: "Local")] }
+        }
+        try await authors.load()
+        let screen = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { $0 }
+
+        await screen.load()
+        let error = try #require(screen.error as? CompositionError)
+        guard case .missingEntrySource? = error.errors.first as? ContinuumError else {
+            Issue.record("Expected a missing entry loader error")
+            return
+        }
+        guard case .result(.failure) = screen.latest else {
+            Issue.record("Expected the unresolved initial pair to fail")
+            return
+        }
+        #expect(authors.values.map(\.id) == [1])
+    }
+
     @Test("Remote root loads reuse local entries and fetch distinct missing IDs in parallel")
     func resolvesMissingEntries() async throws {
         let lookups = EntryLookups()
@@ -16,8 +69,9 @@ struct ResolvedBucketTests {
                 return [Post(authorID: 1), Post(authorID: 2), Post(authorID: 3), Post(authorID: 2)]
             }
         }
-        let resolved = posts.resolving(\.authorID, from: authors)
-        let child = Composition { Input(resolved) } transform: { $0 }
+        let child = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { $0 }
         let screen = Composition {
             Input(child)
             Input(posts)
@@ -29,13 +83,13 @@ struct ResolvedBucketTests {
         let rootCalls = await roots.count
         #expect(calls.sorted() == [2, 3])
         #expect(rootCalls == 1)
-        #expect(resolved.isResolving)
-        #expect(snapshot(resolved.latest) == nil)
+        #expect(child.isLoading)
+        #expect(snapshot(child.latest) == nil)
         await lookups.finish(2, with: .success("Two"))
         await lookups.finish(3, with: .success("Three"))
         await load.value
 
-        let result = try #require(snapshot(resolved.latest))
+        let result = try #require(snapshot(child.latest))
         #expect(result.root.map(\.authorID) == [1, 2, 3, 2])
         #expect(result.related[1]?.name == "Local")
         #expect(result.related[2]?.name == "Two")
@@ -46,7 +100,7 @@ struct ResolvedBucketTests {
         try await authors.mutate { mutation in
             try await mutation.update { _ in [Author(id: 1, name: "Edited")] }
         }
-        await waitUntil { snapshot(resolved.latest)?.related[1]?.name == "Edited" }
+        await waitUntil { snapshot(child.latest)?.related[1]?.name == "Edited" }
         let callsAfterEdit = await lookups.calls
         #expect(callsAfterEdit.sorted() == [2, 3])
     }
@@ -66,8 +120,9 @@ struct ResolvedBucketTests {
                 }
             )
         }
-        let resolved = posts.resolving(\.authorID, from: authors)
-        let screen = Composition { Input(resolved) } transform: { $0.root.count }
+        let screen = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { $0.root.count }
         await screen.load()
         #expect(snapshot(screen.latest) == 1)
 
@@ -82,15 +137,15 @@ struct ResolvedBucketTests {
         try await authors.mutate { mutation in
             try await mutation.update { _ in [Author(id: 1, name: "Edited")] }
         }
-        let retry = Task { await resolved.load() }
+        let retry = Task { await screen.load() }
         await lookups.waitForCalls(3)
         #expect(screen.error != nil)
-        #expect(resolved.isResolving)
+        #expect(screen.isLoading)
         let calls = await lookups.calls
         #expect(calls.sorted() == [2, 3, 3])
         await lookups.finish(3, with: .success("Three"))
         await retry.value
-        await waitUntil { snapshot(screen.latest) == 3 }
+        #expect(snapshot(screen.latest) == 3)
         let pageCalls = await pages.count
         #expect(pageCalls == 1)
         #expect(screen.error == nil)
@@ -106,8 +161,9 @@ struct ResolvedBucketTests {
             )
         }
         let authors = makeAuthors(lookups)
-        let resolved = posts.resolving(\.authorID, from: authors)
-        let screen = Composition { Input(resolved) } transform: { $0.root.count }
+        let screen = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { $0.root.count }
         let loading = Task { await screen.load() }
 
         await lookups.waitForCalls(1)
@@ -121,7 +177,7 @@ struct ResolvedBucketTests {
 
         #expect(snapshot(screen.latest) == 2)
         #expect(await lookups.calls == [2, 3])
-        #expect(!resolved.isResolving)
+        #expect(!screen.isLoading)
     }
 
     @Test("Resetting the root fences late relationship results")
@@ -129,8 +185,9 @@ struct ResolvedBucketTests {
         let lookups = EntryLookups()
         let posts = Bucket(Key<[Post]>("resolved.reset")) { LocalSource { [Post(authorID: 2)] } }
         let authors = makeAuthors(lookups)
-        let resolved = posts.resolving(\.authorID, from: authors)
-        let screen = Composition { Input(resolved) } transform: { $0 }
+        let screen = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { $0 }
         let loading = Task { await screen.load() }
         await lookups.waitForCalls(1)
         try await posts.reset()
@@ -138,7 +195,41 @@ struct ResolvedBucketTests {
         await loading.value
         if case .reset = screen.latest {} else { Issue.record("Expected reset after the obsolete lookup returned") }
         #expect(screen.error == nil)
-        #expect(!resolved.isResolving)
+        #expect(!screen.isLoading)
+    }
+
+    @Test("Resetting an unloaded related bucket invalidates entries fetched by ID")
+    func resetsUnloadedRelatedBucket() async throws {
+        let lookups = EntryLookups()
+        let posts = Bucket(Key<[Post]>("relationship.reset.posts")) { LocalSource { [Post(authorID: 2)] } }
+        let authors = makeAuthors(lookups)
+        let screen = Composition {
+            Input(posts).resolving(\.authorID, from: authors)
+        } transform: { resolved in
+            resolved.related[2]?.name ?? "Missing author"
+        }
+
+        let initialLoad = Task { await screen.load() }
+        await lookups.waitForCalls(1)
+        await lookups.finish(2, with: .success("Before reset"))
+        await initialLoad.value
+        #expect(!authors.isLoaded)
+        var updates = screen.makeAsyncIterator()
+        let initialUpdate = try #require(await updates.next())
+        #expect(snapshot(initialUpdate) == "Before reset")
+
+        try await authors.reset()
+        guard case .reset? = await updates.next() else {
+            Issue.record("Expected reset after discarding the fetched entry")
+            return
+        }
+        #expect(await lookups.calls == [2])
+
+        let reload = Task { await screen.load() }
+        await lookups.waitForCalls(2)
+        await lookups.finish(2, with: .success("After reset"))
+        await reload.value
+        #expect(snapshot(screen.latest) == "After reset")
     }
 
     private func makeAuthors(_ lookups: EntryLookups) -> IdentifiedBucket<Author> {

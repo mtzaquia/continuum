@@ -24,12 +24,12 @@
 @MainActor
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
-    let loadSource: (any LoadableUpdateSource)?
+    let loadSource: (any LoadableSource)?
 
     /// Observes a Continuum or external ``UpdateSource``.
     ///
-    /// By default, composition loads also load buckets, resolved buckets, and
-    /// nested compositions. Set `loads` to `false` to skip loading through this
+    /// By default, composition loads also load buckets and nested
+    /// compositions. Set `loads` to `false` to skip loading through this
     /// input. Call an external source's operations directly.
     public init(_ source: any UpdateSource<Value>, loads: Bool = true) {
         let resetSource = source as? any CompositionResetSource
@@ -41,7 +41,7 @@ public struct Input<Value: Sendable> {
                 return source.error.map { [$0] }
             })
         }
-        loadSource = loads ? source as? any LoadableUpdateSource : nil
+        loadSource = loads ? source as? any LoadableSource : nil
     }
 
     /// Reads an observable expression. A domain `nil` is an available value.
@@ -49,9 +49,9 @@ public struct Input<Value: Sendable> {
         self.init(read: { .init(outcome: .result(.success(read()))) })
     }
 
-    private init(
+    init(
         read: @escaping @MainActor () -> CompositionInputState<Value>,
-        loadSource: (any LoadableUpdateSource)? = nil
+        loadSource: (any LoadableSource)? = nil
     ) {
         self.read = read
         self.loadSource = loadSource

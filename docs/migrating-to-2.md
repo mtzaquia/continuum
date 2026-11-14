@@ -32,10 +32,8 @@ Use `MutationAction<Space>` as the operation type for a closure-based bucket. Th
 
 A failed refresh keeps a usable snapshot as `.result(.success(snapshot))`. Use `bucket.error` or `composition.error` for refresh feedback. A collection load with no usable snapshot can still publish a failure. Composed failures default to `CompositionError`, even for a single error. `mapFailures:` receives current input errors, including optional and nested inputs, followed by any transform error. [Composition errors](composition.md#observe-composition-errors)
 
-For Ensemble, keep forwarding `.result` to `sink.receive` and `.reset` to `sink.reset`. A failure banner for retained data can read the source's `error`. [Ensemble binding](composition.md#bind-to-ensemble)
-
 ## Update composition inputs
 
-- Pass buckets, resolved buckets, and nested compositions to `Input(source)`. Remove closures that only forwarded the load policy. Use `Input(source, loads: false)` in place of a no-op load closure.
+- Pass buckets and nested compositions to `Input(source)`. Remove closures that only forwarded the load policy. Use `Input(source, loads: false)` in place of a no-op load closure.
 - Replace `Input(update:load:)`, `Input(updates:)`, `InputSubscriptionBehavior`, and custom per-input load closures with an observable `UpdateSource`. The external source owns its requests, subscriptions, and reset. Call its methods directly. [External source example](composition.md#observe-an-external-source)
-- Replace `Input(posts).resolving(\.authorID, from: authors)` with `Input(posts.resolving(\.authorID, from: authors))`. Retain the resolved source to share or retry its work. The transform receives one `ResolvedSnapshot` with `root` and `related`. Configure former one-shot lookups as `loadEntry:` on the related bucket, and call `loadNext()` on the root bucket. [Resolve related entries](composition.md#resolve-related-entries)
+- Declare the relationship with `Input(posts).resolving(\.authorID, from: authors)`. The transform receives one `ResolvedSnapshot` with `root` and `related`. Configure former one-shot lookups as `loadEntry:` on the related bucket. Retry from the composition and call `loadNext()` on the root bucket. [Resolve related entries](composition.md#resolve-related-entries)

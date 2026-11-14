@@ -31,33 +31,21 @@ public struct ResolvedSnapshot<Element: Sendable, ID: Hashable & Sendable, Relat
     public let related: [ID: Related]
 }
 
-/// Resolves an array snapshot against an indexed bucket on the main actor.
-///
-/// Create this source with `bucket.resolving(_:from:)` and pass it to
-/// ``Input`` to compose the result. Load pages and reset data on the
-/// underlying buckets.
 @MainActor
 @Observable
-public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Related: Sendable>: UpdateSource {
-    /// The root array and related entries published together.
-    public typealias Snapshot = ResolvedSnapshot<Element, ID, Related>
-
-    /// The last complete pair, an initial failure, or `.reset` when unavailable.
-    public private(set) var latest: Update<Snapshot> = .reset
-
-    /// The current resolution or root load error, including while a retry is in progress.
-    public var error: (any Error)? { resolutionError ?? root.error }
-
-    /// Whether lookups for the current root are in progress.
-    public private(set) var isResolving = false
-
+private final class RelationshipInput<Element: Sendable, ID: Hashable & Sendable, Related: Sendable, RelatedOperation: Sendable>:
+    LoadableSource
+{
+    typealias Snapshot = ResolvedSnapshot<Element, ID, Related>
+    private var latest: Update<Snapshot> = .reset
     private var resolutionError: (any Error)?
-    private(set) var resetRevision: UInt = 0
-    @ObservationIgnored private let root: any LoadableUpdateSource<[Element]>
-    @ObservationIgnored private let rootReset: any CompositionResetSource
+    private var readRootErrors: @MainActor () -> [any Error] = { [] }
+
+    private var resetRevision: UInt = 0
+    @ObservationIgnored private let readRoot: @MainActor () -> CompositionInputState<[Element]>
+    @ObservationIgnored private let rootLoader: (any LoadableSource)?
     @ObservationIgnored private let key: KeyPath<Element, ID>
-    @ObservationIgnored private let readRelated: @MainActor () -> (entries: [ID: Related], revision: UInt)
-    @ObservationIgnored private let loadEntry: @MainActor @Sendable (ID) async throws -> Related
+    @ObservationIgnored private let relatedBucket: Bucket<IndexedKey<ID, Related>, RelatedOperation>
     @ObservationIgnored private let observation = ObservationSubscription()
     private enum Lookup {
         case pending(UUID, Task<Void, Never>)
@@ -76,53 +64,36 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
     @ObservationIgnored private var waitsAfterRelatedReset = false
     @ObservationIgnored private var rootLoad: UUID?
 
-    fileprivate init<Space: ContinuumKeySpace, Operation, RelatedOperation>(
-        root: Bucket<Space, Operation>,
+    init(
+        root: Input<[Element]>,
         key: KeyPath<Element, ID>,
         related: Bucket<IndexedKey<ID, Related>, RelatedOperation>
-    ) where Space.Snapshot == [Element] {
-        self.root = root
-        rootReset = root
+    ) {
+        readRoot = root.read
+        rootLoader = root.loadSource
         self.key = key
-        readRelated = {
-            let entries = Dictionary(uniqueKeysWithValues: related.values.map {
-                (related.keySpace.input(for: $0), $0)
-            })
-            return (entries, related.resetRevision)
-        }
-        loadEntry = { try await related.load(id: $0, using: .cached) }
-        previousRootReset = root.resetRevision
+        relatedBucket = related
+        previousRootReset = root.read().resetRevision
         previousRelatedReset = related.resetRevision
         reconcile()
     }
 
-    /// Loads the root if needed and waits for related lookups to settle.
-    ///
-    /// `.cached` reuses an available root. The other policies load the root
-    /// before resolving missing entries. All policies reuse available related
-    /// entries. Retry failed lookups by calling this method again.
-    ///
-    /// - Parameter policy: The policy used when a root load is needed.
-    public func load(using policy: LoadPolicy = .cached) async {
-        await SourceLoadContext.load(self, using: policy)
-    }
-
     func load(in context: SourceLoadContext) async {
         guard !Task.isCancelled else { return }
-        let revision = rootReset.resetRevision
-        let relatedRevision = readRelated().revision
-        if context.policy != .cached || root.latest.snapshot == nil {
+        let rootRevision = readRoot().resetRevision
+        let relatedRevision = relatedBucket.resetRevision
+        if let rootLoader {
             let request = UUID()
             rootLoad = request
-            await context.load(root)
+            await context.load(rootLoader)
             if rootLoad == request { rootLoad = nil }
         }
-        guard rootReset.resetRevision == revision, readRelated().revision == relatedRevision else {
+        guard readRoot().resetRevision == rootRevision, relatedBucket.resetRevision == relatedRevision else {
             reconcile()
             return
         }
-        reconcile(explicit: !Task.isCancelled)
-        guard !Task.isCancelled, rootLoad != nil || isResolving else { return }
+        let hasPendingLookups = reconcile(explicit: !Task.isCancelled)
+        guard !Task.isCancelled, rootLoad != nil || hasPendingLookups else { return }
 
         // Wait for the current snapshot to settle, even if a page replaces it
         // while lookups are in progress. Cancellation ends only this wait.
@@ -133,36 +104,51 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
         for await _ in stream {}
     }
 
-    private func reconcile(explicit: Bool = false) {
-        let (update, rootRevision, related) = observation.track {
-            (root.latest, rootReset.resetRevision, readRelated())
+    @discardableResult
+    private func reconcile(explicit: Bool = false) -> Bool {
+        let (root, relatedValues, relatedRevision) = observation.track {
+            (readRoot(), relatedBucket.values, relatedBucket.resetRevision)
         } onChange: { [weak self] in
             self?.reconcile()
         }
 
-        let relatedWasReset = related.revision != previousRelatedReset
-        if rootRevision != previousRootReset || relatedWasReset {
+        readRootErrors = root.errors
+        let relatedWasReset = relatedRevision != previousRelatedReset
+        if root.resetRevision != previousRootReset || relatedWasReset {
             clear()
         }
         if relatedWasReset { waitsAfterRelatedReset = true }
         if explicit { waitsAfterRelatedReset = false }
-        previousRootReset = rootRevision
-        previousRelatedReset = related.revision
+        previousRootReset = root.resetRevision
+        previousRelatedReset = relatedRevision
 
-        switch update {
+        switch root.outcome {
         case .reset:
             if case .result = latest { clear() }
+            return false
         case .result(.failure(let error)):
             resolutionError = nil
             latest = .result(.failure(error))
             finishWaiting()
+            return false
         case .result(.success(let elements)):
-            guard rootLoad == nil else { return }
-            resolve(elements, available: related.entries, explicit: explicit)
+            guard rootLoad == nil else { return false }
+            let entries = Dictionary(uniqueKeysWithValues: relatedValues.map {
+                (relatedBucket.keySpace.input(for: $0), $0)
+            })
+            return resolve(elements, available: entries, explicit: explicit)
         }
     }
 
-    private func resolve(_ elements: [Element], available: [ID: Related], explicit: Bool) {
+    func read() -> CompositionInputState<Snapshot> {
+        .init(outcome: latest, resetRevision: resetRevision, reportedFailures: {
+            let rootErrors = self.readRootErrors()
+            if let resolutionError = self.resolutionError { return rootErrors + [resolutionError] }
+            return rootErrors.isEmpty ? nil : rootErrors
+        })
+    }
+
+    private func resolve(_ elements: [Element], available: [ID: Related], explicit: Bool) -> Bool {
         var seen: Set<ID> = []
         let ids = elements.map { $0[keyPath: key] }.filter { seen.insert($0).inserted }
         for id in Array(lookups.keys) where !seen.contains(id) || available[id] != nil {
@@ -192,8 +178,7 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
             }
         }
 
-        isResolving = pending
-        guard !pending else { return }
+        guard !pending else { return true }
         if let firstError {
             resolutionError = firstError
             if latest.snapshot == nil { latest = .result(.failure(firstError)) }
@@ -203,15 +188,16 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
             latest = .result(.success(.init(root: elements, related: entries)))
         }
         finishWaiting()
+        return false
     }
 
     private func startLookup(_ id: ID) {
         let request = UUID()
-        let loadEntry = loadEntry
+        let relatedBucket = relatedBucket
         let task = Task { @MainActor [weak self] in
             let result: Lookup
             do {
-                result = .resolved(try await loadEntry(id))
+                result = .resolved(try await relatedBucket.load(id: id))
             } catch {
                 result = .failed(error is CancellationError ? nil : error)
             }
@@ -231,7 +217,6 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
     private func clear() {
         for lookup in lookups.values { lookup.cancel() }
         lookups.removeAll()
-        isResolving = false
         resolutionError = nil
         resetRevision &+= 1
         latest = .reset
@@ -243,23 +228,29 @@ public final class ResolvedBucket<Element: Sendable, ID: Hashable & Sendable, Re
     }
 }
 
-extension ResolvedBucket: LoadableUpdateSource, CompositionResetSource {}
-
-public extension Bucket {
-    /// Observes this collection and looks up each distinct related ID as needed.
+public extension Input {
+    /// Resolves each distinct ID referenced by this array input.
     ///
-    /// Resolution uses existing entries and fetches missing IDs concurrently
-    /// through the related bucket's entry loader. Pages are loaded on this
-    /// bucket. The resolved source publishes each complete pair asynchronously.
-    /// Keep the resolved source to share its lookup results across consumers.
+    /// Reuses entries already in the related bucket. Distinct missing IDs
+    /// load concurrently through its `loadEntry:` closure. The input supplies
+    /// the root and resolved entries together as one ``ResolvedSnapshot``.
+    /// A failed lookup retains the last complete pair when available.
+    /// Call the composition's `load()` to retry and paginate on the buckets.
+    /// If this input has loading disabled, the root is observed and lookups
+    /// still follow the available root.
     ///
     /// - Parameters:
     ///   - key: The related bucket's index on each root entry.
-    ///   - related: The indexed bucket that owns the related entries and loader.
+    ///   - related: The indexed bucket that supplies related entries. It needs
+    ///     a loader only for IDs that are missing from its current snapshot.
     func resolving<Element, ID, Related, RelatedOperation>(
         _ key: KeyPath<Element, ID>,
         from related: Bucket<IndexedKey<ID, Related>, RelatedOperation>
-    ) -> ResolvedBucket<Element, ID, Related> where Space.Snapshot == [Element] {
-        ResolvedBucket(root: self, key: key, related: related)
+    ) -> Input<ResolvedSnapshot<Element, ID, Related>> where Value == [Element] {
+        let relationship = RelationshipInput(root: self, key: key, related: related)
+        return Input<ResolvedSnapshot<Element, ID, Related>>(
+            read: relationship.read,
+            loadSource: relationship
+        )
     }
 }

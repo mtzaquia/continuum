@@ -55,6 +55,37 @@ struct FreshnessTests {
         #expect(service.calls == 2)
     }
 
+    @Test("A relationship input forwards cached loads so its root applies freshness")
+    func relationshipRootFreshness() async throws {
+        let time = TestTime()
+        let service = Service()
+        let root: ValueBucket<[Int]> = Bucket(
+            Key<[Int]>("freshness.relationship.root"),
+            staleAfter: .seconds(10),
+            now: { time.instant },
+            configuration: BucketConfiguration(remoteSources: [
+                RemoteSource { [try await service.load()] },
+            ])
+        )
+        let related = Bucket(IndexedKey<Int, Int>("freshness.relationship.related", indexedBy: { $0 })) {
+            LocalSource { [1, 2] }
+        }
+        try await root.load()
+        try await related.load()
+        let composition = Composition {
+            Input(root).resolving(\.self, from: related)
+        } transform: { $0.root }
+
+        await composition.load()
+        #expect(composition.latest.snapshot == [1])
+        #expect(service.calls == 1)
+
+        time.advance(by: .seconds(10))
+        await composition.load()
+        #expect(composition.latest.snapshot == [2])
+        #expect(service.calls == 2)
+    }
+
     @Test("Omitting freshness preserves unlimited memory and local cache reuse")
     func unlimited() async throws {
         let time = TestTime()

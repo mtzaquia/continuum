@@ -49,4 +49,4 @@ let workflow = Bucket(Key<Workflow>("workflow")) {
 
 Use `pagination.isLoading`, `pagination.hasNextPage`, and `pagination.error` for continuation state, or their bucket shortcuts `isLoadingNextPage`, `hasNextPage`, and `nextPageError`. A failed page keeps the current snapshot and cursor. Call `loadNext()` again to retry.
 
-A composition observes the merged snapshot. When using a [resolved bucket](composition.md#resolve-related-entries), related lookups can continue after `loadNext()` returns. [Operation ordering](operation-ordering.md)
+A composition observes the merged snapshot. With a [relationship input](composition.md#resolve-related-entries), related lookups can continue after `loadNext()` returns. [Operation ordering](operation-ordering.md)

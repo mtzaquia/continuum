@@ -107,7 +107,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     private var currentError: (any Error)?
     private var activeLoads = 0
     @ObservationIgnored private let evaluate: @MainActor () -> CompositionEvaluation<Output>
-    @ObservationIgnored private let loadSources: [any LoadableUpdateSource]
+    @ObservationIgnored private let loadSources: [any LoadableSource]
     @ObservationIgnored private var subscribers: [UUID: AsyncStream<Element>.Continuation] = [:]
     @ObservationIgnored private var previousInputs: [CompositionEvaluation<Output>.InputStatus] = []
     @ObservationIgnored private let observation = ObservationSubscription()
@@ -115,7 +115,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     @ObservationIgnored private var reportErrors: (@MainActor () -> (underlying: [any Error], mapped: (any Error)?))?
 
     init(
-        loadSources: [any LoadableUpdateSource],
+        loadSources: [any LoadableSource],
         evaluate: @escaping @MainActor () -> CompositionEvaluation<Output>
     ) {
         self.loadSources = loadSources
@@ -239,7 +239,7 @@ final class BucketObservationLifetime: Sendable {
 }
 
 
-extension Composition: LoadableUpdateSource, CompositionResetSource {}
+extension Composition: UpdateSource, LoadableSource, CompositionResetSource {}
 
 public extension Composition {
     /// Creates a live, observable and asynchronously iterable snapshot composition.
@@ -266,7 +266,7 @@ public extension Composition {
         transform: @escaping @MainActor (repeat each Value) throws -> Output
     ) {
         let inputs = inputs().inputs
-        var loadSources: [any LoadableUpdateSource] = []
+        var loadSources: [any LoadableSource] = []
         for input in repeat each inputs {
             if let source = input.loadSource { loadSources.append(source) }
         }

@@ -16,7 +16,7 @@ let overview = Composition {
 
 | Input | Behavior |
 | --- | --- |
-| `Input(source)` | Observe an `UpdateSource`. Buckets, resolved buckets, and nested compositions also participate in loading. |
+| `Input(source)` | Observe an `UpdateSource`. Buckets and nested compositions also participate in loading. |
 | `Input(source, loads: false)` | Observe a Continuum source without loading it through this input. |
 | `Input { expression }` | Read an always-available value and track the observable properties it reads. |
 | `.optional()` | Supply `nil` when the input is unavailable or failed. Its error still contributes to `Composition.error`. |
@@ -62,11 +62,12 @@ A required Continuum source's reset clears the prior composed result even when t
 
 ## Resolve related entries
 
-Use `bucket.resolving(_:from:)` when a collection refers to entries in an indexed bucket.
+Use `Input(root).resolving(_:from:)` when a collection refers to entries in an indexed bucket.
 
 ```swift
-let feed = posts.resolving(\.authorID, from: authors)
-let rows = Composition { Input(feed) } transform: { snapshot in
+let rows = Composition {
+  Input(posts).resolving(\.authorID, from: authors)
+} transform: { snapshot in
   snapshot.root.map { post in
     FeedRow(post: post, author: snapshot.related[post.authorID])
   }
@@ -77,11 +78,11 @@ await rows.load()
 
 The root array supplies row order. The dictionary supplies authors by ID. `FeedRow` in this example accepts an optional author because a Swift dictionary subscript returns an optional.
 
-The resolved source reuses matching entries already in the related bucket and fetches distinct missing IDs concurrently with `loadEntry`. Retain the resolved source to reuse its work across compositions. It publishes the root and related entries together.
+The input reuses matching entries already loaded in the related bucket, including a selected partition. Its `RemoteSource` needs `loadEntry:` only to fetch missing IDs. Distinct missing IDs load concurrently. When no entry loader can supply a missing ID, the input reports `ContinuumError.missingEntrySource`. The input publishes the root and related entries together.
 
 - Call `posts.loadNext()` to advance the cursor. The complete pair updates as related lookups finish. A failed page is retried on `posts`.
-- Call `feed.load()` to settle or retry missing entries for the current root. With an available root, the default `.cached` policy reuses it. `.remote` and `.cachedThenRemote` first load the root and still reuse available related entries. If another page arrives during lookup, the load waits for the current pair to settle.
-- A lookup failure leaves the prior complete pair visible and appears in `feed.error`. Without a complete pair, `latest` reports a failure. Reset either underlying bucket to invalidate the pair. After a related-bucket reset, call `feed.load()` to resolve the current root again.
+- Call `rows.load()` to load the root and settle or retry missing entries. The root applies its own load policy, including freshness for `.cached`. Related lookups reuse available entries for every policy. Use `Input(root, loads: false)` to observe the root and resolve related entries while managing the root's loads separately. If another page arrives during lookup, the load waits for the current pair to settle.
+- A lookup failure leaves the prior complete pair visible and appears in `rows.error`. Without a complete pair, a required input fails the composition. Use `.optional()` if the transform can accept a missing pair. Reset either bucket to invalidate the pair. After a related-bucket reset, call `rows.load()` to resolve the current root again.
 
 ## Observe an external source
 
@@ -112,16 +113,3 @@ func makeBadge(from unreadCount: UnreadCountSource) -> Composition<String> {
 ```
 
 `error` defaults to `nil`. Publish an initial fetch failure as a failure in `latest`. For a failed refresh with usable data, retain the success in `latest` and expose the operation failure through `error`. On reset, clear any error and publish `.reset`. The external source also owns cancellation and discarding obsolete results.
-
-## Bind to Ensemble
-
-In an [Ensemble](https://github.com/mtzaquia/ensemble) 3 `@ViewDataSource` binding, call the appropriate source load in `refresh`. In `receive`, use this mapping.
-
-```swift
-switch update {
-case .result(let result): sink.receive(result)
-case .reset: sink.reset()
-}
-```
-
-Read `composition.error` separately for refresh feedback when data stays available. `AsyncContent` connects the source on render. Call `viewData.connect()` for a consumer that uses `ViewData` directly. See the [consumer fixture](../IntegrationTests/EnsembleConsumer/README.md) for a runnable binding.

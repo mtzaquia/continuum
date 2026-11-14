@@ -41,7 +41,7 @@ extension Update {
 
 /// The public observation contract for inputs to a composition.
 ///
-/// Continuum's buckets, resolved buckets, and compositions conform to this
+/// Continuum's buckets and compositions conform to this
 /// protocol. Apps and other libraries can conform their own observable classes
 /// and pass them to ``Input``. The source owns its loading, reset, and subscription
 /// lifecycle.
@@ -69,10 +69,9 @@ protocol CompositionResetSource: AnyObject {
     var resetRevision: UInt { get }
 }
 
-/// A source that can participate in a composition load. Publish failures through
-/// `latest` or `error` so all observers see the same outcome.
+/// A participant in a composition load.
 @MainActor
-protocol LoadableUpdateSource<Snapshot>: UpdateSource, Sendable {
+protocol LoadableSource: AnyObject, Sendable {
     func load(in context: SourceLoadContext) async
 }
 
@@ -89,7 +88,7 @@ final class SourceLoadContext: Sendable {
     private init(policy: LoadPolicy) { self.policy = policy }
 
     @MainActor
-    static func load(_ source: any LoadableUpdateSource, using policy: LoadPolicy) async {
+    static func load(_ source: any LoadableSource, using policy: LoadPolicy) async {
         let context = Self(policy: policy)
         await withTaskCancellationHandler {
             await source.load(in: context)
@@ -99,7 +98,7 @@ final class SourceLoadContext: Sendable {
     }
 
     @MainActor
-    func loadAll(_ sources: [any LoadableUpdateSource]) async {
+    func loadAll(_ sources: [any LoadableSource]) async {
         await withTaskGroup(of: Void.self) { group in
             for source in sources {
                 group.addTask { await self.load(source) }
@@ -108,7 +107,7 @@ final class SourceLoadContext: Sendable {
     }
 
     @MainActor
-    func load(_ source: any LoadableUpdateSource) async {
+    func load(_ source: any LoadableSource) async {
         guard !Task.isCancelled else { return }
         let id = ObjectIdentifier(source)
         let task = state.withLock { state -> Task<Void, Never>? in
@@ -206,5 +205,3 @@ func makeSourceObservation<Source: UpdateSource & Sendable>(
         producer.cancel()
     })
 }
-
-extension Bucket: LoadableUpdateSource, CompositionResetSource {}

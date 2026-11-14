@@ -103,8 +103,9 @@ struct IntegrationTests {
             )
         }
         let posts = Bucket(Key<[Int]>("ensemble.posts")) { LocalSource { [1] } }
-        let feed = posts.resolving(\.self, from: names)
-        let child = Composition { Input(feed) } transform: { $0.related[1]?.name ?? "" }
+        let child = Composition {
+            Input(posts).resolving(\.self, from: names)
+        } transform: { $0.related[1]?.name ?? "" }
         let composition = Composition { Input(child) } transform: { $0 }
         let model = Consumer(composition)
         let data = model.data
@@ -124,14 +125,14 @@ struct IntegrationTests {
         if case .unavailable = data.latestValue {} else { Issue.record("Reset relationships must clear retained data") }
 
         await service.setFailure(true)
-        await feed.load()
+        await composition.load()
         while let update = await received.next() {
             if case .result(.failure) = update { break }
         }
         if case .failure = data.phase {} else { Issue.record("Expected failure phase") }
 
         await service.setFailure(false)
-        await feed.load()
+        await composition.load()
         while let update = await received.next() {
             if case .result(.success("name-1")) = update { break }
         }

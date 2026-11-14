@@ -75,11 +75,7 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
         let generation: UInt
         let operationID: String
         let task: Task<LoadOutcome, any Error>
-    }
-
-    private struct CompletedFlight {
-        let generation: UInt
-        let result: Result<LoadOutcome, any Error>
+        var continuesToRemote = false
     }
 
     private struct NextPageFlight {
@@ -107,7 +103,7 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
 
     private var loading = false
     private var operationError: (any Error)?
-    private var paginationState = PaginationState()
+    private var pageError: (any Error)?
 
     private var latestUpdate: Update<Space.Snapshot> = .reset
     private(set) var resetRevision: UInt = 0
@@ -143,9 +139,8 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
     private var inFlight: InFlight?
 
     @ObservationIgnored
-    private var completedFlight: CompletedFlight?
+    private var completedLoad: Result<LoadOutcome, any Error>?
 
-    @ObservationIgnored
     private var paginationCheckpoint = PaginationCheckpoint.unavailable
 
     @ObservationIgnored
@@ -156,9 +151,6 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
 
     @ObservationIgnored
     private var nextPageIdentifier: UInt = 0
-
-    @ObservationIgnored
-    private var remoteContinuationGeneration: UInt?
 
     @ObservationIgnored
     private var generation: UInt = 0
@@ -486,7 +478,6 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
             supersedeMutations()
             supersedeSourceWork()
             let ownership = MutationOwnership(epoch: mutationEpoch, generation: generation)
-            if case .reset = previousUpdate { resetRevision &+= 1 }
             publishMutation(nil)
             clearPagination()
 
@@ -513,6 +504,8 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
     }
 }
 
+extension Bucket: UpdateSource, LoadableSource, CompositionResetSource {}
+
 public extension Bucket where Space.Input == SingletonInput {
     /// The current singleton value without starting a load.
     var value: Space.Value? {
@@ -523,22 +516,23 @@ public extension Bucket where Space.Input == SingletonInput {
 public extension Bucket {
     /// The current next-page loading state.
     var pagination: PaginationState {
-        paginationState
+        PaginationState(isLoading: isLoadingNextPage, hasNextPage: hasNextPage, error: nextPageError)
     }
 
     /// Whether a continuation page is currently loading.
     var isLoadingNextPage: Bool {
-        paginationState.isLoading
+        access(keyPath: \.isLoadingNextPage)
+        return nextPageInFlight != nil
     }
 
     /// Whether the latest remote page supplied another cursor.
     var hasNextPage: Bool {
-        paginationState.hasNextPage
+        paginationCheckpoint.continuation != nil
     }
 
     /// The latest next-page error, or `nil` after success, refresh, or reset.
     var nextPageError: (any Error)? {
-        paginationState.error
+        pageError
     }
 
     /// Loads and merges the next remote page.
@@ -573,17 +567,10 @@ public extension Bucket {
 private extension Bucket {
     var snapshot: Space.Snapshot? { latestUpdate.snapshot }
 
-    func publish(_ update: Update<Space.Snapshot>) {
-        if case .reset = update, case .result = latestUpdate {
-            resetRevision &+= 1
-        }
-        latestUpdate = update
-    }
-
     private func publishFailure(_ error: any Error) {
         loading = false
         operationError = error
-        publish(snapshot.map { .result(.success($0)) } ?? .result(.failure(error)))
+        latestUpdate = snapshot.map { .result(.success($0)) } ?? .result(.failure(error))
     }
 
     var currentOperationID: String {
@@ -802,7 +789,7 @@ private extension Bucket {
         do {
             try await persistence.persist(updated)
             try requireCurrent(ownership)
-            publish(.result(.success(updated)))
+            latestUpdate = .result(.success(updated))
         } catch {
             if ownsState(ownership) {
                 try? await persistence.persist(previous, restoring: true)
@@ -814,8 +801,14 @@ private extension Bucket {
     private func publishMutation(_ snapshot: Space.Snapshot?) {
         loading = false
         operationError = nil
-        if snapshot == nil { lastRemoteLoad = nil }
-        publish(snapshot.map { .result(.success($0)) } ?? .reset)
+        if let snapshot {
+            latestUpdate = .result(.success(snapshot))
+        } else {
+            lastRemoteLoad = nil
+            // An explicit reset also invalidates derived entries when this bucket is empty.
+            resetRevision &+= 1
+            latestUpdate = .reset
+        }
     }
 
     private func rollback(
@@ -832,9 +825,9 @@ private extension Bucket {
         operationError = error is CancellationError ? nil : error
         if let paginationCheckpoint {
             self.paginationCheckpoint = paginationCheckpoint
-            paginationState = PaginationState(hasNextPage: paginationCheckpoint.continuation != nil)
+            pageError = nil
         }
-        publish(previousUpdate)
+        latestUpdate = previousUpdate
         try? await persistence.persist(previousUpdate.snapshot, restoring: true)
     }
 
@@ -930,7 +923,7 @@ private extension Bucket {
                     activeOperationID: current.operationID
                 )
             )
-            remoteContinuationGeneration = current.generation
+            inFlight?.continuesToRemote = true
             return try await resolve(current).snapshot
         }
 
@@ -992,7 +985,6 @@ private extension Bucket {
         }
         let flight = InFlight(epoch: mutationEpoch, generation: generation, operationID: operationID, task: task)
         inFlight = flight
-        completedFlight = nil
         loading = true
         return flight
     }
@@ -1061,7 +1053,7 @@ private extension Bucket {
             let result = await flight.task.result
             guard mutationEpoch == initialFlight.epoch else { throw CancellationError() }
             guard generation == flight.generation else {
-                if let replacement = completedReplacement(for: flight.generation) {
+                if let replacement = completedLoad {
                     return try replacement.get()
                 }
                 guard let replacement = inFlight else { throw CancellationError() }
@@ -1070,9 +1062,8 @@ private extension Bucket {
             }
 
             if case .success(let outcome) = result, outcome.origin == .local,
-               remoteContinuationGeneration == flight.generation, let remoteSource {
+               inFlight?.continuesToRemote == true, let remoteSource {
                 publishCached(outcome.snapshot, generation: flight.generation)
-                remoteContinuationGeneration = nil
                 flight = ContinuumLogContext.withOperationID(flight.operationID) {
                     makeLoadFlight(using: .remote, remoteSource: remoteSource)
                 }
@@ -1084,21 +1075,6 @@ private extension Bucket {
             }
             return try result.get()
         }
-    }
-
-    private func completedReplacement(
-        for requestedGeneration: UInt
-    ) -> Result<LoadOutcome, any Error>? {
-        guard let completedFlight else {
-            return nil
-        }
-
-        if completedFlight.generation == requestedGeneration
-            || completedFlight.generation == generation {
-            return completedFlight.result
-        }
-
-        return nil
     }
 
     func missingRemoteSource() -> ContinuumError {
@@ -1123,6 +1099,7 @@ private extension Bucket {
     func nextGeneration() -> UInt {
         for task in entryTasks.values { task.cancel() }
         entryTasks.removeAll()
+        completedLoad = nil
         generation &+= 1
         return generation
     }
@@ -1131,8 +1108,6 @@ private extension Bucket {
         inFlight?.task.cancel()
         _ = nextGeneration()
         inFlight = nil
-        completedFlight = nil
-        remoteContinuationGeneration = nil
         cancelNextPageWork()
     }
 
@@ -1142,7 +1117,7 @@ private extension Bucket {
             return
         }
 
-        publish(.result(.success(snapshot)))
+        latestUpdate = .result(.success(snapshot))
         if let operationID = inFlight?.operationID {
             ContinuumLogContext.withOperationID(operationID) {
                 continuumDebug(
@@ -1157,8 +1132,7 @@ private extension Bucket {
 
     private func finishLoad(_ result: Result<LoadOutcome, any Error>, flight: InFlight) {
         inFlight = nil
-        remoteContinuationGeneration = nil
-        completedFlight = CompletedFlight(generation: flight.generation, result: result)
+        completedLoad = result
 
         ContinuumLogContext.withOperationID(flight.operationID) {
             switch result {
@@ -1166,11 +1140,11 @@ private extension Bucket {
                 if outcome.origin == .remote {
                     lastRemoteLoad = now()
                     paginationCheckpoint = remoteSource?.isPaginated == true ? .available(outcome.nextPage) : .unavailable
-                    paginationState = PaginationState(hasNextPage: outcome.nextPage != nil)
+                    pageError = nil
                 }
                 loading = false
                 operationError = nil
-                publish(.result(.success(outcome.snapshot)))
+                latestUpdate = .result(.success(outcome.snapshot))
                 continuumDebug(.loadCompleted(
                     logIdentity,
                     origin: outcome.origin.debugName,
@@ -1194,18 +1168,20 @@ private extension Bucket {
 
     func cancelNextPageWork() {
         nextPageInFlight?.task.cancel()
-        nextPageInFlight = nil
+        setNextPageFlight(nil)
         completedNextPageFlight = nil
-        paginationState = PaginationState(
-            hasNextPage: paginationCheckpoint.continuation != nil
-        )
+        pageError = nil
+    }
+
+    // Keep the task accessible to deinit while observing changes to its presence.
+    private func setNextPageFlight(_ flight: NextPageFlight?) {
+        withMutation(keyPath: \.isLoadingNextPage) {
+            nextPageInFlight = flight
+        }
     }
 
     func clearPagination() {
         paginationCheckpoint = .unavailable
-        nextPageInFlight = nil
-        completedNextPageFlight = nil
-        paginationState = PaginationState()
     }
 }
 
@@ -1299,12 +1275,9 @@ private extension Bucket {
             operationID: operationID,
             task: task
         )
-        nextPageInFlight = flight
+        setNextPageFlight(flight)
         completedNextPageFlight = nil
-        paginationState = PaginationState(
-            isLoading: true,
-            hasNextPage: true
-        )
+        pageError = nil
         return flight
     }
 
@@ -1328,7 +1301,7 @@ private extension Bucket {
                 return snapshot
             }
 
-            nextPageInFlight = nil
+            setNextPageFlight(nil)
             completedNextPageFlight = CompletedNextPageFlight(
                 generation: flight.generation,
                 identifier: flight.identifier,
@@ -1338,13 +1311,13 @@ private extension Bucket {
                 switch result {
                 case .success(let page):
                     paginationCheckpoint = .available(page.nextPage)
-                    paginationState = PaginationState(hasNextPage: page.nextPage != nil)
-                    publish(.result(.success(page.snapshot)))
+                    pageError = nil
+                    latestUpdate = .result(.success(page.snapshot))
                     continuumDebug(.paginationCompleted(
                         logIdentity, count: snapshotCount(page.snapshot), hasNextPage: page.nextPage != nil
                     ))
                 case .failure(let error):
-                    paginationState = PaginationState(hasNextPage: paginationCheckpoint.continuation != nil, error: error)
+                    pageError = error
                     logLoadFailure(error, operation: "next-page")
                 }
             }
@@ -1368,10 +1341,7 @@ private extension Bucket {
 
     func recordPaginationError(_ error: any Error) {
         continuumDebug(.operationFailed(logIdentity, operation: "next-page", error: error))
-        paginationState = PaginationState(
-            hasNextPage: paginationCheckpoint.continuation != nil,
-            error: error
-        )
+        pageError = error
     }
 }
 

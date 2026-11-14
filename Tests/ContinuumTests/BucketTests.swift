@@ -1431,24 +1431,30 @@ struct BucketTests {
         }
         _ = try await labels.load()
 
-        async let first = labels.loadNext()
-        async let second = labels.loadNext()
-        await nextPage.waitForLoads(1)
+        try await confirmation("Page loading is observable") { started in
+            #expect(!withObservationTracking { labels.pagination.isLoading } onChange: { started() })
+            let first = Task { try await labels.loadNext() }
+            let second = Task { try await labels.loadNext() }
+            await nextPage.waitForLoads(1)
 
-        #expect(labels.isLoadingNextPage)
-        #expect(labels.isLoading == false)
+            #expect(labels.isLoadingNextPage)
+            #expect(!labels.isLoading)
 
-        await nextPage.complete(
-            load: 1,
-            with: Page(
-                values: [Label(id: 2, text: "two")],
-                next: nil
-            )
-        )
-        let snapshots = try await (first, second)
-
-        #expect(snapshots.0 == snapshots.1)
-        #expect(snapshots.0.map(\.id) == [1, 2])
+            try await confirmation("Cursor changes are observable") { exhausted in
+                #expect(withObservationTracking { labels.hasNextPage } onChange: { exhausted() })
+                await nextPage.complete(
+                    load: 1,
+                    with: Page(
+                        values: [Label(id: 2, text: "two")],
+                        next: nil
+                    )
+                )
+                let snapshots = try await (first.value, second.value)
+                #expect(snapshots.0 == snapshots.1)
+                #expect(snapshots.0.map(\.id) == [1, 2])
+                #expect(!labels.pagination.hasNextPage)
+            }
+        }
         #expect(await nextPage.loadCount == 1)
     }
 
