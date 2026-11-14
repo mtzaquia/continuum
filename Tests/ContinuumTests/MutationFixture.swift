@@ -1,21 +1,7 @@
 @testable import Continuum
 import Testing
 
-extension Bucket where Scope == UnpartitionedBucketScope, Operation == MutationAction<Space> {
-    func put(_ value: Space.Value) async throws {
-        try await storage.put(value)
-    }
-
-    func delete(_ input: Space.Input) async throws {
-        try await storage.delete(input)
-    }
-
-    func delete() async throws where Space.Input == SingletonInput {
-        try await storage.delete()
-    }
-}
-
-extension BucketPartition where Operation == MutationAction<Space> {
+extension Bucket where Operation == MutationAction<Space> {
     func put(_ value: Space.Value) async throws {
         try #require(isLoaded)
         let key = keySpace

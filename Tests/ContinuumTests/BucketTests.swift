@@ -162,7 +162,7 @@ struct BucketTests {
     @Test("The partition initializer establishes independent snapshots")
     func partitionedSnapshots() async throws {
         let requested = PartitionCounter<Purpose>()
-        let labels: PartitionedIndexedBucket<Purpose, Int, Label> = Bucket(
+        let labels: PartitionedIndexedBucket<Purpose, Int, Label> = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { purpose in
@@ -201,7 +201,7 @@ struct BucketTests {
 
     @Test("Update streams are scoped to a partition lifetime")
     func partitionedUpdates() async throws {
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { _ in
@@ -228,7 +228,7 @@ struct BucketTests {
     func combinedUpdates() async throws {
         let count = Bucket(TestData.count) { LocalSource { 2 } }
         let labels = Bucket(TestData.labels) { LocalSource { [Label(id: 1, text: "one")] } }
-        let subscriptions = Bucket(
+        let subscriptions = PartitionedBucket(
             TestData.subscription,
             partitionedBy: Purpose.self
         ) { _ in
@@ -303,7 +303,7 @@ struct BucketTests {
 
     @Test("A loaded empty partition does not load another partition")
     func partitionedEmptyState() async throws {
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { _ in
@@ -320,7 +320,7 @@ struct BucketTests {
 
     @Test("Partition mutations remain scoped to the selected list")
     func partitionedMutations() async throws {
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { _ in LocalSource { [] } }
@@ -343,7 +343,7 @@ struct BucketTests {
     @Test("Loads coalesce within a partition but not across partitions")
     func partitionedCoalescing() async throws {
         let counter = PartitionCounter<Purpose>()
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { purpose in
@@ -365,7 +365,7 @@ struct BucketTests {
 
     @Test("A selected partition participates in observation tracking")
     func partitionObservation() async throws {
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { _ in LocalSource { [] } }
@@ -1320,8 +1320,8 @@ struct BucketTests {
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [
                             Label(id: 1, text: "one"),
@@ -1329,8 +1329,8 @@ struct BucketTests {
                         ],
                         next: 2
                     )
-                }
-                NextPage { cursor in
+                },
+                nextPage: NextPage { cursor in
                     await nextPages.increment()
                     #expect(cursor == 2)
                     return Page(
@@ -1341,7 +1341,7 @@ struct BucketTests {
                         next: Optional<Int>.none
                     )
                 }
-            }
+            )
         }
 
         #expect(labels.hasNextPage == false)
@@ -1376,20 +1376,20 @@ struct BucketTests {
     func paginatedRemoteMutations() async throws {
         let calls = StringRecorder()
         let labels = Bucket(TestData.labels) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [Label(id: 1, text: "one")],
                         next: 2
                     )
-                }
-                NextPage { _ in
+                },
+                nextPage: NextPage { _ in
                     Page(
                         values: [Label](),
                         next: Optional<Int>.none
                     )
                 }
-            }
+            )
         }
         _ = try await labels.load()
 
@@ -1416,18 +1416,18 @@ struct BucketTests {
     func paginationCoalescing() async throws {
         let nextPage = SnapshotGate<Page<[Label], Int>>()
         let labels = Bucket(TestData.labels) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [Label(id: 1, text: "one")],
                         next: 2
                     )
-                }
-                NextPage { cursor in
+                },
+                nextPage: NextPage { cursor in
                     #expect(cursor == 2)
                     return await nextPage.load()
                 }
-            }
+            )
         }
         _ = try await labels.load()
 
@@ -1456,14 +1456,14 @@ struct BucketTests {
     func paginationFailure() async throws {
         let attempts = Counter()
         let labels = Bucket(TestData.labels) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [Label(id: 1, text: "one")],
                         next: "cursor"
                     )
-                }
-                NextPage { cursor in
+                },
+                nextPage: NextPage { cursor in
                     #expect(cursor == "cursor")
                     await attempts.increment()
                     if await attempts.value == 1 {
@@ -1474,7 +1474,7 @@ struct BucketTests {
                         next: Optional<String>.none
                     )
                 }
-            }
+            )
         }
         _ = try await labels.load()
 
@@ -1508,14 +1508,14 @@ struct BucketTests {
                     throw TestError.failed
                 }
             }
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(values: [existing], next: "cursor")
-                }
-                NextPage { (_: String) in
+                },
+                nextPage: NextPage { (_: String) in
                     Page(values: [Label](), next: nil)
                 }
-            }
+            )
         }
         _ = try await labels.load()
 
@@ -1538,8 +1538,8 @@ struct BucketTests {
         let firstPages = Counter()
         let nextPage = SnapshotGate<Page<[Label], Int>>()
         let labels = Bucket(TestData.labels) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     await firstPages.increment()
                     if await firstPages.value == 1 {
                         return Page(
@@ -1551,11 +1551,11 @@ struct BucketTests {
                         values: [Label(id: 9, text: "refreshed")],
                         next: nil
                     )
-                }
-                NextPage { _ in
+                },
+                nextPage: NextPage { _ in
                     await nextPage.load()
                 }
-            }
+            )
         }
         _ = try await labels.load()
 
@@ -1586,12 +1586,12 @@ struct BucketTests {
     @Test("Pagination remains independent for each selected partition")
     func partitionPagination() async throws {
         let pages = PartitionCounter<Purpose>()
-        let labels = Bucket(
+        let labels = PartitionedBucket(
             TestData.labels,
             partitionedBy: Purpose.self
         ) { purpose in
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [
                             Label(
@@ -1601,8 +1601,8 @@ struct BucketTests {
                         ],
                         next: 2
                     )
-                }
-                NextPage { _ in
+                },
+                nextPage: NextPage { _ in
                     await pages.increment(purpose)
                     return Page(
                         values: [
@@ -1614,7 +1614,7 @@ struct BucketTests {
                         next: Optional<Int>.none
                     )
                 }
-            }
+            )
         }
 
         _ = try await labels[.buy].load()
@@ -1635,20 +1635,20 @@ struct BucketTests {
             RemoteSource { [Label(id: 1, text: "one")] }
         }
         let paginated = Bucket(TestData.labels) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         values: [Label(id: 1, text: "one")],
                         next: 2
                     )
-                }
-                NextPage { _ in
+                },
+                nextPage: NextPage { _ in
                     Page(
                         values: [Label](),
                         next: Optional<Int>.none
                     )
                 }
-            }
+            )
         }
 
         await #expect(throws: ContinuumError.self) {
@@ -1667,8 +1667,8 @@ struct BucketTests {
     @Test("A nested page refreshes siblings and accumulates only its collection")
     func nestedPagination() async throws {
         let subscription = Bucket(TestData.subscription) {
-            RemoteSource {
-                Load {
+            RemoteSource(
+                {
                     Page(
                         value: Subscription(
                             plan: "starter",
@@ -1679,8 +1679,8 @@ struct BucketTests {
                         ),
                         next: 2
                     )
-                }
-                NextPage(
+                },
+                nextPage: NextPage(
                     accumulating: \.runs,
                     indexedBy: \.id
                 ) { cursor in
@@ -1696,7 +1696,7 @@ struct BucketTests {
                         next: Optional<Int>.none
                     )
                 }
-            }
+            )
         }
 
         let first = try await subscription.load()

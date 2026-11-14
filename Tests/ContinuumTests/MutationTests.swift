@@ -77,7 +77,7 @@ struct MutationTests {
 
     @Test("Each selected partition owns the handler and its snapshot")
     func partitionedHandler() async throws {
-        let bucket = Bucket(Key<String>("labels"), partitionedBy: String.self) { partition in
+        let bucket = PartitionedBucket(Key<String>("labels"), partitionedBy: String.self) { partition in
             RemoteSource { partition }
             Mutate { (operation: LabelOperation, mutation) in
                 switch operation {

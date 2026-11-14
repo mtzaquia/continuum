@@ -20,50 +20,47 @@
 //  SOFTWARE.
 //
 
-/// The scope dimension owned by a ``Bucket``.
-///
-/// Ordinary callers rely on type inference and the bucket type aliases rather
-/// than declaring scope types directly.
-nonisolated public protocol BucketScope {
-    /// The value selecting one independently loaded partition.
-    associatedtype Partition: Hashable & Sendable
+/// Selects an independently loaded bucket for each partition key.
+@MainActor
+public final class PartitionedBucket<Partition: Hashable & Sendable, Space: ContinuumKeySpace, Operation: Sendable> {
+    /// The key space shared by the selected buckets.
+    public let keySpace: Space
+    private let staleAfter: Duration?
+    private let configuration: @MainActor @Sendable (Partition) -> BucketConfiguration<Space, Operation>
+    private var buckets: [Partition: Bucket<Space, Operation>] = [:]
+
+    /// Configures buckets lazily. Each bucket tracks freshness independently.
+    public init(
+        _ keySpace: Space,
+        partitionedBy _: Partition.Type,
+        staleAfter: Duration? = nil,
+        @BucketBuilder<Space> configuration:
+            @escaping @MainActor @Sendable (Partition) -> BucketConfiguration<Space, Operation>
+    ) {
+        precondition(staleAfter.map { $0 >= .zero } ?? true, "staleAfter must be nonnegative.")
+        self.keySpace = keySpace
+        self.staleAfter = staleAfter
+        self.configuration = configuration
+    }
+
+    /// Returns the same bucket for equal keys. The container retains each selected bucket.
+    public subscript(partition: Partition) -> Bucket<Space, Operation> {
+        if let bucket = buckets[partition] { return bucket }
+        let bucket = Bucket(keySpace, staleAfter: staleAfter, configuration: configuration(partition))
+        buckets[partition] = bucket
+        return bucket
+    }
 }
-
-/// The scope used by a bucket that owns one unpartitioned snapshot.
-nonisolated public enum UnpartitionedBucketScope: BucketScope {
-    /// The internal partition witness for the single snapshot.
-    public typealias Partition = SingletonInput
-}
-
-/// A bucket scope that exposes independently loaded partitions.
-nonisolated public protocol PartitionedBucketScope: BucketScope {}
-
-/// The scope used by a bucket partitioned by `Partition`.
-///
-/// Callers create this scope through
-/// ``Bucket/init(_:partitionedBy:staleAfter:configuration:)``.
-nonisolated public enum PartitionedScope<
-    Value: Hashable & Sendable
->: PartitionedBucketScope {
-    /// The stable value that selects one partition.
-    public typealias Partition = Value
-}
-
-/// An observable data bucket containing independently loaded partitions.
-public typealias PartitionedBucket<
-    Partition: Hashable & Sendable,
-    Space: ContinuumKeySpace
-> = Bucket<Space, PartitionedScope<Partition>, MutationAction<Space>>
 
 /// An unpartitioned bucket whose snapshot is one value.
 public typealias ValueBucket<Value: Sendable> =
-    Bucket<Key<Value>, UnpartitionedBucketScope, MutationAction<Key<Value>>>
+    Bucket<Key<Value>, MutationAction<Key<Value>>>
 
 /// A bucket whose partitions each own one value.
 public typealias PartitionedValueBucket<
     Partition: Hashable & Sendable,
     Value: Sendable
-> = PartitionedBucket<Partition, Key<Value>>
+> = PartitionedBucket<Partition, Key<Value>, MutationAction<Key<Value>>>
 
 /// An unpartitioned collection bucket whose index type is `Value.ID`.
 public typealias IdentifiedBucket<Value: Identifiable & Sendable> =
@@ -75,27 +72,16 @@ public typealias PartitionedIdentifiedBucket<
     Value: Identifiable & Sendable
 > = PartitionedIndexedBucket<Partition, Value.ID, Value> where Value.ID: Hashable & Sendable
 
-/// An unpartitioned bucket with a typed mutation operation.
-public typealias MutableBucket<Space: ContinuumKeySpace, Operation: Sendable> =
-    Bucket<Space, UnpartitionedBucketScope, Operation>
-
-/// A bucket whose selected partitions accept a typed mutation operation.
-public typealias PartitionedMutableBucket<
-    Partition: Hashable & Sendable,
-    Space: ContinuumKeySpace,
-    Operation: Sendable
-> = Bucket<Space, PartitionedScope<Partition>, Operation>
-
 /// An unpartitioned single-value bucket with a typed mutation operation.
 public typealias MutableValueBucket<Value: Sendable, Operation: Sendable> =
-    MutableBucket<Key<Value>, Operation>
+    Bucket<Key<Value>, Operation>
 
 /// A bucket whose partitions each own one value and accept a typed mutation operation.
 public typealias PartitionedMutableValueBucket<
     Partition: Hashable & Sendable,
     Value: Sendable,
     Operation: Sendable
-> = PartitionedMutableBucket<Partition, Key<Value>, Operation>
+> = PartitionedBucket<Partition, Key<Value>, Operation>
 
 /// An unpartitioned collection bucket with a typed mutation operation and `Value.ID` as its index.
 public typealias MutableIdentifiedBucket<Value: Identifiable & Sendable, Operation: Sendable> =

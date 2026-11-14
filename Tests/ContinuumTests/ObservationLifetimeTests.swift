@@ -6,7 +6,7 @@ import Testing
 struct ObservationLifetimeTests {
     @Test("Accessed partitions live until their owning bucket is released")
     func partitionRetention() {
-        var bucket: PartitionedValueBucket<Int, Int>? = Bucket(
+        var bucket: PartitionedValueBucket<Int, Int>? = PartitionedBucket(
             Key<Int>("lifetime.partition"), partitionedBy: Int.self
         ) { _ in }
         weak var selected = bucket?[42]

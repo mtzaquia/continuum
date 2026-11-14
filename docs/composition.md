@@ -21,14 +21,10 @@ indexed favorites bucket supplies `[Favorite]`. No snapshot wrapper is exposed.
 
 | Input | Behavior |
 | --- | --- |
-| `Input(bucket)` or `Input(bucket[key])` | Observe the snapshot and load it with the composition's policy. |
-| `Input(composition)` | Observe the child and forward the parent's load policy to it. |
-| `Input(source)` for other update sources | Observe the source. |
-| `Input(source) { policy in … }` | Run the supplied action in place of any default action. |
-| `Input(source) { _ in }` | Observe a bucket or child composition without loading it through this input. |
-| `Input { expression }` | Observe an always-available value. Add `load: { policy in … }` for loading. |
-| `Input(update: { … }, load: …)` | Observe an external outcome that can be available, unavailable, or failed. The load action is optional. |
-| `.optional()` | Supply nil when the input has no available outcome or its outcome is a failure. |
+| `Input(source)` | Observe an `UpdateSource`. Forward loads when the source conforms to `LoadableUpdateSource`. |
+| `Input(source, loads: false)` | Observe a source without forwarding loads. |
+| `Input { expression }` | Read an always-available observable value. |
+| `.optional()` | Supply nil when the input is unavailable or failed. Its error still contributes to the composition error. |
 
 Required inputs block the transform until available. Empty collections are
 available. An optional-valued bucket remains required unless `.optional()` is
@@ -37,40 +33,30 @@ A successfully loaded nil, a failure, and unavailability then all contribute nil
 
 Construct and access compositions on the main actor. Observable read closures
 should have no side effects; nonobservable mutations cannot trigger updates.
-Bucket loads start when you call the composition's `load` method. Sequence
-subscriptions and relationship resolution have the startup behavior described
-below.
 
 ## Load the composition
 
 ```swift
-await displayUser.load() // Uses .cached.
-await displayUser.load(using: .remote)
+let overview = Composition {
+  Input(repo.card)
+  Input(repo.fundingSources[cardID])
+} transform: { card, sources in
+  CardOverview(card: card, fundingSources: sources)
+}
+
+await overview.load(using: .remote)
+try await repo.fundingSources[cardID].reset()
 ```
 
-The composition forwards its policy unchanged to bucket and partition loaders,
-child compositions, and custom actions. Independent actions run concurrently,
-and `load` waits for all of them. A failed action does not cancel siblings.
-Custom actions update their observed sources. The composition reads values
-from those sources as they become available.
+A load forwards the policy unchanged and waits for each distinct loadable source.
+Independent sources load concurrently, and shared sources load once across
+nested branches. Each source publishes its own errors. `isLoading` tracks
+active calls to the composition's `load`.
 
-Composition loading returns `Void`. A bucket input with an established snapshot
-continues to supply its value after its load action throws. Sibling changes still
-reach the output, and new subscribers receive the composed value. Observe the
-composition's `error` to present the refresh failure alongside the retained data.
+Call reset, entry loading, pagination, and mutations directly on the source.
+The composition observes the resulting changes.
 
-A required bucket whose collection load fails without a snapshot fails the
-composition. Published input failures follow the source's recovery. Other
-loading action failures clear on the next load. Caller cancellation propagates
-to actions without publishing a cancellation error.
-
-Overlapping loads may run concurrently; the newest invocation owns each action's
-error state. A relationship declaration replaces its previous dependent work.
-Bucket policies still govern shared source flights. `isLoading` describes active
-composition load calls, not subscriptions or automatic relationship lookups.
-
-Independent inputs can reflect different refresh moments. A composition is not
-a transaction across buckets. [Bucket loading policies →](loading.md)
+[Bucket loading policies →](loading.md)
 
 ## Observe outcomes and resets
 
@@ -105,8 +91,8 @@ outcome visible until a new result arrives or the bucket is reset.
 
 If a required reset accompanies a failure, the composition emits reset first
 so consumers can clear invalid retained data. Reset history from buckets and
-nested compositions survives observation coalescing. Unrelated inputs continue
-observing; resets do not invoke loading actions or restart subscriptions.
+nested compositions survives observation coalescing. For a custom source,
+the composition reacts when it observes an unavailable outcome.
 
 Each iterator is independent. Observation may coalesce changes, equal results
 may repeat, and buffering is unbounded. [Ownership and buffering →](resource-lifetime.md)
@@ -115,9 +101,10 @@ may repeat, and buffering is unbounded. [Ownership and buffering →](resource-l
 
 `error` is observable and can be set while `latest` is successful. It includes
 current errors from required and optional inputs, including bucket operation
-errors with retained data. Nested compositions contribute their underlying errors
-in place. The order follows input declaration order, with a thrown transform
-error last. Errors clear as their sources recover.
+errors with retained data. During a bucket retry, the previous error stays
+available alongside any usable snapshot. Nested compositions contribute their
+underlying errors in place. The order follows input declaration order, with a
+thrown transform error last. Errors clear as their sources recover.
 
 The default `mapFailures:` returns a `CompositionError` with an ordered `errors`
 array. Each evaluation maps the full list once when errors are present. If a
@@ -125,159 +112,24 @@ required input blocks the transform or the transform throws, `latest` publishes
 the same mapped error as `error`. That failure can include errors from optional
 inputs. Keep the mapper free of side effects.
 
-## Resolve relationships
+## Compose a repository query
 
-Pair `.resolving` with an array input when its entries identify required data:
+Have a repository conform to `UpdateSource` when it owns an observable
+`latest: Update<Snapshot>`. Add `LoadableUpdateSource` to participate in
+composition loads.
 
-```swift
-let authors = Bucket(IndexedKey<Author.ID, Author>("authors")) {
-  RemoteSource {
-    Load { try await client.authors() }
-    Load { id in try await client.author(id: id) }
-  }
-}
+Publish an unavailable query's failure through `latest`. If a refresh fails
+while its snapshot is still usable, keep that snapshot in `latest` and publish
+the refresh error through `error`. Preserve both during retry. On reset, clear
+the snapshot and error, publish `.reset`, and discard results from requests
+that started before that reset.
 
-let feed = Composition {
-  Input(posts).resolving(\.authorID, from: authors)
-} transform: { posts, authorsByID in
-  posts.map { post in
-    FeedRow(post: post, author: authorsByID[post.authorID])
-  }
-}
-```
-
-This contributes **two parameters**: `[Post]` and `[Author.ID: Author]`.
-Continuum deduplicates keys, loads their entries concurrently, and delivers
-the root and complete dictionary together. A previous complete pair may remain
-visible while its replacement resolves. Empty roots supply an empty dictionary.
-Dictionary subscripts still return Swift optionals.
-
-Resolution uses [entry loading](loading.md#load-one-indexed-entry): existing
-entries stay observed; missing entries are fetched without changing the list.
-The composition retains the latest observed value while its key is needed,
-including after removal from the list. Resetting the bucket invalidates it.
-Failed lookups still fail a required relationship until a successful relationship
-load or reset. The related bucket keeps its collection outcome and records the
-entry error separately. Collection edits alone do not clear relationship errors.
-
-`from:` also accepts an explicitly selected indexed partition. Partition keys
-select a collection (such as a search query); foreign keys select its entries.
-A cached entry needs no loader. Fetching without an entry `Load` produces
-`ContinuumError.missingEntrySource`, which fails the required relationship.
-
-### Use a one-shot lookup
-
-For a service that does not expose buckets, replace `from:` with a closure:
-
-```swift
-Input(posts).resolving(\.authorID) { id, policy in
-  try await legacyService.author(id: id, using: policy)
-}
-```
-
-The sendable closure runs away from main-actor isolation and returns a sendable
-value. Returned values are retained while their keys remain needed, but are not
-observed after return. Use buckets when you need shared caching, persistence,
-mutation, invalidation, or live observation. This bridge has no cache
-configuration or TTL.
-
-### Understand resolution work
-
-| Trigger | Work |
-| --- | --- |
-| Explicit composition load | Load the root if it has a loading action, then resolve all required keys with the same policy. |
-| Available root at construction, or a changed root | Resolve newly introduced keys with `.cached`; retain values for continuing keys. Failed one-shot lookups are retryable. |
-| Keys leave the root | Discard their derived values and stop observing their sources. |
-| Root reset | Clear the pair and discard retained relationship values. |
-| Related bucket reset | Invalidate the pair; wait for explicit loading or externally established data. |
-
-For `.cachedThenRemote`, relationships follow the completed root refresh.
-`loadNext()` changes an array root through ordinary observation; no special
-pagination composition API is needed.
-
-Required lookup failures use the usual failure outcome. Retry with
-`await feed.load(using: ...)`. New roots and explicit loads cancel obsolete
-relationship work; late returns cannot replace the current pair. Caller
-cancellation cancels that load's dependent tasks. Native bucket flights retain
-their shared-work cancellation rules and remain independently observable.
-
-The root must be `Input<[Element]>`. Elements and resolved values are sendable;
-keys are `Hashable & Sendable`, and key paths must preserve sendability. The
-related collection's index must match the foreign-key type. One relationship per declaration
-is supported; chaining and `.optional()` on the pair are not. A conditional
-builder block can make both parameters optional.
-
-## Bridge other observable state
-
-Use `Input(update:load:)` when another repository owns the current phase.
-Map the phase to an `Update` by reading the repository's observable properties.
-
-```swift
-let feed = Composition {
-  Input(
-    update: {
-      switch legacyPosts.phase {
-      case .idle, .loading: .reset
-      case .loaded(let posts): .result(.success(posts))
-      case .failed(let error): .result(.failure(error))
-      }
-    },
-    load: { policy in try await legacyPosts.load(using: policy) }
-  )
-} transform: { posts in
-  posts.map(\.title)
-}
-```
-
-A required input waits while the closure returns `.reset`. An observed reset
-clears a previous result, and a failure outcome fails the composition.
-With `.optional()`, an unavailable or failed outcome supplies `nil` and any
-error is available through `Composition.error`. An array outcome can serve as
-the root of `.resolving`, with the relationship supplied by a separate lookup.
-
-Omit `load` for observation alone. An explicit composition load forwards its
-policy to the action. The action establishes a value by updating the observed
-state. If the closure reports a failure when the action throws, the reported
-failure is used. An otherwise unreported action error stays visible during a
-retry. A successful action clears it, and a new failure replaces it.
-
-An observed reset propagates through nested compositions. If the repository
-resets and replaces its data before the closure is read again, Observation may
-deliver only the replacement.
-
-Use `Input { expression }` for an always-available value such as a preference.
-
-## Bridge result sequences
-
-```swift
-let displayUser = Composition {
-  Input(
-    updates: { service.results() },
-    subscriptionOnLoad: .restart,
-    load: { policy in try await service.refresh(using: policy) }
-  )
-} transform: { user in
-  DisplayUser(user: user)
-}
-```
-
-The factory returns a `Sendable` async sequence of `Result<Value, Failure>`.
-Standard `AsyncStream` and `AsyncThrowingStream` work. The first read of
-`latest` or `error`, first iterator, or explicit load starts the subscription,
-including for nested compositions. The factory runs on the main actor, then
-iteration runs in its own task. The iterator itself need not be sendable.
-
-`subscriptionOnLoad` defaults to `.keep`, including after completion. With
-`.restart`, a load that first uses the composition creates one subscription.
-Later loads replace the subscription and create the new iterator before the
-action runs. Omit the action if subscribing itself starts work. Iterator
-creation does not guarantee that a hot upstream stream is ready for events.
-
-Before the first result, required inputs wait and optional inputs supply nil.
-Result failures recover on later successes. A thrown iteration error becomes a
-failure and ends the subscription; normal completion retains the last outcome.
-Restart retains the outcome and rejects late results from the old subscription.
-Neither completion nor restart emits reset.
+A query can own an upstream sequence subscription or fetch a joined snapshot
+through bucket entry loaders. For example, a feed query can load posts, fetch
+the distinct author IDs through `authors.load(id:using:)`, and publish the
+joined result before returning. Pass that query to `Input(feed)`. When the
+required data is already available in buckets, pass those buckets as separate
+inputs and join their snapshots in the transform.
 
 ## Nest and select inputs
 
@@ -296,16 +148,13 @@ let screen = Composition {
 }
 ```
 
-Each top-level load automatically loads a shared child instance once, even when
-multiple inputs or branches reference it. Each branch waits for the child to
-finish. Separate top-level calls run independently. A custom input closure
-replaces forwarding for that input. Use `Input(displayUser) { _ in }` to keep
-observing the child without loading it through that input.
+Each top-level load visits a shared source once, even when multiple inputs or
+branches reference it. Separate top-level calls run independently. Use
+`Input(displayUser, loads: false)` for observation alone.
 
-Branches are selected once at construction. Both sides of `if/else` must supply
-the same types in the same order. An `if` without `else` makes each parameter
-optional. Avoid adding `.optional()` inside that block: the branch adds its own
-optional layer. Loops and dynamically changing input counts are not supported.
+Branches are selected once at construction. Both sides of `if/else` supply the
+same parameter types in order. An `if` without `else` makes each parameter
+optional.
 
 ## Bind to Ensemble
 
@@ -323,7 +172,7 @@ final class DisplayUserModel {
 
   @ViewDataSource(
     make: { (model: Self) in model.displayUser },
-    refresh: { model in await model.displayUser.load(using: .remote) },
+    refresh: { model, _ in await model.displayUser.load(using: .remote) },
     receive: { _, update, sink in
       switch update {
       case .result(let result): sink.receive(result)
@@ -347,6 +196,6 @@ banner or log the failure, observe the model's `error`.
 [Migration guide →](migrating-to-2.md)
 
 The [consumer fixture](../IntegrationTests/EnsembleConsumer/README.md) verifies
-bucket, nested-composition, and relationship bindings.
+bucket, nested-composition, and repository query bindings.
 
 Next: [Loading](loading.md) · [Resource lifetime](resource-lifetime.md)

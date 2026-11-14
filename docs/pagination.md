@@ -1,19 +1,19 @@
 # Paginate a bucket
 
-Keep the initial load and continuation together inside `RemoteSource`:
+Configure the initial request and its continuation together.
 
 ```swift
 let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
-  RemoteSource {
-    Load {
+  RemoteSource(
+    {
       let page = try await client.posts(after: nil)
       return Page(values: page.posts, next: page.nextCursor)
-    }
-    NextPage { cursor in
+    },
+    nextPage: NextPage { cursor in
       let page = try await client.posts(after: cursor)
       return Page(values: page.posts, next: page.nextCursor)
     }
-  }
+  )
 }
 
 try await posts.load(using: .remote)
@@ -35,16 +35,16 @@ before requesting pages. Each partition owns an independent continuation.
 For an aggregate response, name the collection to merge:
 
 ```swift
-RemoteSource {
-  Load {
+RemoteSource(
+  {
     let page = try await client.subscription(after: nil)
     return Page(value: page.subscription, next: page.nextCursor)
-  }
-  NextPage(accumulating: \.runs, indexedBy: \.id) { cursor in
+  },
+  nextPage: NextPage(accumulating: \.runs, indexedBy: \.id) { cursor in
     let page = try await client.subscription(after: cursor)
     return Page(value: page.subscription, next: page.nextCursor)
   }
-}
+)
 ```
 
 The incoming aggregate supplies all sibling properties; only `runs` accumulates.
@@ -65,8 +65,8 @@ Concurrent calls for one cursor share work. Page loading waits for mutations and
 initial loading before capturing its base. A mutation or forced refresh can
 supersede it. [Operation ordering →](operation-ordering.md)
 
-If new entries introduce foreign keys, an ordinary
-`Input(posts).resolving(\.authorID, from: authors)` resolves them before publishing
-the expanded pair. [Relationship resolution →](composition.md#resolve-relationships)
+Paginate the selected bucket directly. Its updated snapshot flows to any
+composition that observes it.
+
 
 Next: [Compositions](composition.md) · [Persistence](persistence.md)

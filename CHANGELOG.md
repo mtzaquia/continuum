@@ -14,7 +14,8 @@
 - One `Mutate` handler and `mutate(_:)` replace `Store`, `Remove`, and their
   bucket methods. Snapshot edits publish and persist optimistically. Returned
   server entries and snapshots take precedence.
-- Indexed entry sources use `Load { id in … }` alongside the snapshot loader.
+- Configure remote sources with an unlabeled snapshot or initial-page closure
+  and named `loadEntry` and `nextPage` arguments.
 
 - Buckets and selected partitions keep established snapshots available after a
   failed refresh. Existing subscribers and new subscribers receive the retained
@@ -30,25 +31,21 @@
   errors from optional and nested inputs. `mapFailures:` maps the full list
   once, and a failed `latest` shares the same mapped error. The default returns
   an ordered `CompositionError`.
-- `Input(update:load:)` bridges observable repository state that reports its
-  own availability and failures. Observed resets propagate through nested
-  compositions.
-- `Input(updates:)` starts its sequence subscription on first use of the
-  composition. A first use that loads with `.restart` creates one subscription.
-- `Composition.load(using:)` loads bucket and selected partition inputs with
-  the supplied policy, including optional inputs and relationship roots. Pass
-  `Input(bucket) { _ in }` to observe a bucket without loading it.
-- Nested composition inputs forward the parent's load policy by default. Each
-  shared child loads once per top-level call. Use `Input(child) { _ in }` to
-  observe the child without loading it through that input.
+- `PartitionedBucket` returns the same `Bucket<Space, Operation>` type used
+  for standalone snapshots. Pagination, entry loads, and mutations stay on
+  the selected bucket.
+- `Input(source)` observes buckets, nested compositions, and repository
+  queries. `LoadableUpdateSource` opts a source into load forwarding. Shared
+  sources receive the policy once per call. Use `loads: false` for observation
+  alone. Queries own any sequence subscriptions and relationship fetches.
+- Reset buckets and queries directly. Required-input invalidation propagates
+  through nested compositions.
 - Retired the deprecated update aliases, `bucketUpdates`, `updates()`, and the
   legacy reset overloads and `ResetScope`. Iterate sources directly, use
   `Composition` to combine inputs, and call `try await reset()` to reset.
-- Configured buckets default `staleAfter` to `nil`. Source inputs accept an
-  optional `load` action through one initializer.
+- Configured buckets default `staleAfter` to `nil`.
 
-This changes observable behavior even though existing `Update` switches still
-compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).
+For bucket and composition API migrations, see the [2.0.0 migration guide](docs/migrating-to-2.md).
 
 ### Bucket type aliases
 
@@ -57,6 +54,6 @@ compile. See the [2.0.0 migration guide](docs/migrating-to-2.md).
 - Added `IdentifiedBucket<Value>` and `PartitionedIdentifiedBucket<Partition, Value>`
   for collections indexed by the value's `Identifiable.ID`. Use `IndexedBucket`
   and `PartitionedIndexedBucket` to specify the index type explicitly.
-- Added `MutableBucket` and the `Mutable` variants of the existing bucket
+- Added `Mutable` variants of the value, indexed, and identified bucket
   aliases for typed `Mutate` handlers. These aliases take the operation type
   as their last argument.

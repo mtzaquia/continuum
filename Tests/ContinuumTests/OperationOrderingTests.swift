@@ -157,13 +157,13 @@ struct OperationOrderingTests {
         let gate = OperationGate<Int>()
         let pageEntered = OperationGate<Void>()
         let bucket = Bucket(IndexedKey<Int, Int>("ordering.store-page", indexedBy: { $0 })) {
-            RemoteSource {
-                Load { Page(values: [1], next: 1) }
-                NextPage { (_: Int) in
+            RemoteSource(
+                { Page(values: [1], next: 1) },
+                nextPage: NextPage { (_: Int) in
                     await pageEntered.finish(())
                     return Page(values: [3], next: Optional<Int>.none)
                 }
-            }
+            )
         }
         try await bucket.load()
         let mutation = Task {
@@ -224,10 +224,10 @@ struct OperationOrderingTests {
         let disk = PageDisk()
         let bucket = Bucket(IndexedKey<Int, Int>("ordering.cancel-reset", indexedBy: { $0 })) {
             LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource {
-                Load { Page(values: [1], next: 1) }
-                NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
-            }
+            RemoteSource(
+                { Page(values: [1], next: 1) },
+                nextPage: NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
+            )
         }
         try await bucket.load()
         let reset = Task { try await bucket.reset() }
@@ -270,7 +270,7 @@ struct OperationOrderingTests {
     func retryPreservesStreamFailure(retryFails: Bool) async throws {
         enum Failure: Error { case initial, retry }
         let gate = OperationGate<Result<Int, Failure>>()
-        let bucket = Bucket(Key<Int>("ordering.retry"), partitionedBy: String.self) { _ in
+        let bucket = PartitionedBucket(Key<Int>("ordering.retry"), partitionedBy: String.self) { _ in
             RemoteSource { try await gate.wait().get() }
         }
         let partition = bucket["selected"]
@@ -289,7 +289,7 @@ struct OperationOrderingTests {
         let retry = Task { await composition.load(using: .remote) }
         await gate.started()
         #expect(partition.isLoading)
-        #expect(partition.error == nil)
+        #expect(partition.error as? Failure == .initial)
         if case .result(.failure(let error)) = partition.latest {
             #expect(error as? Failure == .initial)
             var joinedDuringRetry = partition.makeAsyncIterator()
@@ -325,6 +325,45 @@ struct OperationOrderingTests {
         }
         #expect(partition.error == nil)
         #expect(composition.error == nil)
+    }
+
+    @Test("A composition keeps the refresh error alongside its retained snapshot during a retry")
+    func retryPreservesRefreshError() async throws {
+        enum Failure: Error { case refresh }
+        let gate = OperationGate<Result<Int, Failure>>()
+        let bucket = Bucket(Key<Int>("ordering.refresh-error")) {
+            LocalSource { 1 }
+            RemoteSource { try await gate.wait().get() }
+        }
+        let query = Composition { Input(bucket) } transform: { $0 }
+        await query.load()
+
+        let refresh = Task { await query.load(using: .remote) }
+        await gate.started()
+        await gate.finish(.failure(.refresh))
+        await refresh.value
+        let refreshError = query.error as? CompositionError
+        #expect(refreshError?.errors.first as? Failure == .refresh)
+
+        let retry = Task { await query.load(using: .remote) }
+        await gate.started()
+        #expect(query.isLoading)
+        #expect(bucket.error as? Failure == .refresh)
+        let retainedError = query.error as? CompositionError
+        #expect(retainedError?.errors.first as? Failure == .refresh)
+        if case .result(.success(let value)) = query.latest {
+            #expect(value == 1)
+        } else {
+            Issue.record("Expected the query to retain its snapshot during retry")
+        }
+
+        await gate.finish(.success(2))
+        await retry.value
+        #expect(query.error == nil)
+        guard case .result(.success(2)) = query.latest else {
+            Issue.record("Expected the retry to publish the new snapshot")
+            return
+        }
     }
 }
 

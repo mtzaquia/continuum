@@ -68,8 +68,8 @@ alias when you declare a repository property or protocol requirement.
 | Collection with a custom index | `MutableIndexedBucket<Index, Value, Operation>` | `PartitionedMutableIndexedBucket<Partition, Index, Value, Operation>` |
 | Collection indexed by `Identifiable.ID` | `MutableIdentifiedBucket<Value, Operation>` | `PartitionedMutableIdentifiedBucket<Partition, Value, Operation>` |
 
-For a custom key space, use `MutableBucket<Space, Operation>` or
-`PartitionedMutableBucket<Partition, Space, Operation>`. Buckets without a
+For a custom key space, use `Bucket<Space, Operation>` or
+`PartitionedBucket<Partition, Space, Operation>`. Buckets without a
 typed handler use the regular aliases, such as
 `IdentifiedBucket<Card>` or `PartitionedIdentifiedBucket<ProfileID, Card>`.
 

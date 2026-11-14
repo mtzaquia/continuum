@@ -130,9 +130,8 @@ for await update in titles {
 ```
 
 Add `Input` declarations to combine sources. Inputs are required by default;
-`.optional()` supplies nil when unavailable or failed. `.resolving` derives
-relationships from a collection's keys. `titles.load()` loads bucket and nested
-composition inputs with `.cached` by default. Use `Input(source) { _ in }` to
+`.optional()` supplies nil when unavailable or failed. `titles.load()` loads
+each loadable source with `.cached` by default. Use `Input(source, loads: false)` to
 observe an input without loading it through the composition.
 Observe `error` for current input and transform errors, including failed
 refreshes with retained data. The default `CompositionError` lists them in
@@ -144,7 +143,7 @@ input order.
 | I want to… | Read |
 | --- | --- |
 | Load snapshots or individual indexed entries | [Loading](docs/loading.md) |
-| Combine values, streams, and relationships | [Compositions](docs/composition.md) |
+| Combine buckets, queries, and observable values | [Compositions](docs/composition.md) |
 | Keep independent snapshots for different keys | [Partitioning](docs/partitioning.md) |
 | Save snapshots to local storage | [Persistence](docs/persistence.md) |
 | Edit snapshots and send mutations to a server | [Remote mutations](docs/remote-mutations.md) |

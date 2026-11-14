@@ -40,36 +40,27 @@ nonisolated public struct CompositionError: LocalizedError {
 
 @MainActor
 struct CompositionInputState<Value: Sendable> {
-    let value: Value?
-    let unavailable: Bool
-    let failures: [any Error]
+    let outcome: Update<Value>
     var resetRevision: UInt = 0
-    // A separate read keeps error-only changes out of snapshot observation.
+    // Read operation errors separately from the transform's dependencies.
     var reportedFailures: (@MainActor () -> [any Error]?)? = nil
+
+    func errors() -> [any Error] {
+        if let failures = reportedFailures?() { return failures }
+        if case .result(.failure(let error)) = outcome { return [error] }
+        return []
+    }
 }
 
-// Internal invalidation history survives observation coalescing across compositions.
 @MainActor
-protocol CompositionResetSource: AnyObject {
-    var compositionResetRevision: UInt { get }
-}
-
-@MainActor
-protocol CompositionInputSource<Snapshot>: UpdateSource, Sendable {
-    var currentUpdate: Update<Snapshot> { get }
-    var underlyingErrors: [any Error] { get }
-    func activate(forLoad: Bool) -> (@MainActor () -> Void)?
+private protocol CompositionLoadGroup: LoadableUpdateSource {
     func load(in context: CompositionLoadContext) async
 }
-
-// The returned closure ends reuse of subscriptions started for the first load.
-typealias InputActivation = @MainActor (_ forLoad: Bool) -> (@MainActor () -> Void)?
-typealias InputLoad = @MainActor @Sendable (CompositionLoadContext) async -> Void
 
 final class CompositionLoadContext: Sendable {
     private struct State: Sendable {
         var isCancelled = false
-        var children: [ObjectIdentifier: Task<Void, Never>] = [:]
+        var loads: [ObjectIdentifier: Task<Void, Never>] = [:]
     }
 
     let policy: LoadPolicy
@@ -78,17 +69,22 @@ final class CompositionLoadContext: Sendable {
     init(policy: LoadPolicy) { self.policy = policy }
 
     @MainActor
-    func load(_ child: any CompositionInputSource) async {
+    func load(_ source: any LoadableUpdateSource) async {
         guard !Task.isCancelled else { return }
-        let id = ObjectIdentifier(child)
+        let id = ObjectIdentifier(source)
         let task = state.withLock { state -> Task<Void, Never>? in
             guard !state.isCancelled else { return nil }
-            if let task = state.children[id] { return task }
+            if let task = state.loads[id] { return task }
             let task = Task { @MainActor in
                 guard !Task.isCancelled else { return }
-                await child.load(in: self)
+                if let group = source as? any CompositionLoadGroup {
+                    await group.load(in: self)
+                } else {
+                    // The source reports failures through its observable state.
+                    _ = try? await source.load(using: policy)
+                }
             }
-            state.children[id] = task
+            state.loads[id] = task
             return task
         }
         await task?.value
@@ -98,49 +94,9 @@ final class CompositionLoadContext: Sendable {
         // The top-level call owns shared work, even if an individual branch stops waiting.
         let tasks = state.withLock { state in
             state.isCancelled = true
-            return state.children.values
+            return state.loads.values
         }
         for task in tasks { task.cancel() }
-    }
-}
-
-@MainActor
-@Observable
-final class CompositionLoad {
-    var error: (any Error)?
-    @ObservationIgnored private var currentTask: Task<Void, any Error>?
-    let action: @MainActor (LoadPolicy) async throws -> Void
-    let sourceOwnsOutcome: @MainActor () -> Bool
-
-    init(
-        _ action: @escaping @MainActor (LoadPolicy) async throws -> Void,
-        sourceOwnsOutcome: @escaping @MainActor () -> Bool = { false }
-    ) {
-        self.action = action
-        self.sourceOwnsOutcome = sourceOwnsOutcome
-    }
-
-    func run(_ policy: LoadPolicy) async {
-        guard !Task.isCancelled else { return }
-        let action = action
-        let task = Task {
-            try Task.checkCancellation()
-            try await action(policy)
-        }
-        currentTask = task
-        defer { if currentTask == task { currentTask = nil } }
-        let result = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
-        guard currentTask == task, !Task.isCancelled else { return }
-
-        let nextError: (any Error)?
-        switch result {
-        case .success:
-            nextError = nil
-        case .failure(let error):
-            guard !(error is CancellationError) else { return }
-            nextError = sourceOwnsOutcome() ? nil : error
-        }
-        if error != nil || nextError != nil { error = nextError }
     }
 }
 
@@ -177,34 +133,25 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     public typealias Element = Update<Output>
 
     /// The current outcome, initially `.reset`. Loading preserves it.
-    /// Reading this property starts sequence inputs.
-    public var latest: Element {
-        activate()
-        return currentUpdate
-    }
+    public var latest: Element { currentUpdate }
 
     /// The current errors from inputs and the transform, mapped by `mapFailures`.
     ///
     /// Includes optional and nested input errors and can coexist with a successful
     /// ``latest``. A failed ``latest`` carries the same mapped error. Returns `nil`
-    /// when no errors are reported. Reading it starts sequence inputs.
-    public var error: (any Error)? {
-        activate()
-        return currentError
-    }
+    /// when no errors are reported.
+    public var error: (any Error)? { currentError }
 
-    /// Whether any composition load call is still executing its actions.
+    /// Whether any composition load is still waiting for its sources.
     public var isLoading: Bool { activeLoads > 0 }
 
-    private(set) var compositionResetRevision: UInt = 0
-    private(set) var currentUpdate: Element = .reset
+    private(set) var resetRevision: UInt = 0
+    private var currentUpdate: Element = .reset
     private(set) var underlyingErrors: [any Error] = []
     private var currentError: (any Error)?
     private var activeLoads = 0
     @ObservationIgnored private let evaluate: @MainActor () -> CompositionEvaluation<Output>
-    @ObservationIgnored private let activations: [InputActivation]
-    @ObservationIgnored private let loads: [InputLoad]
-    @ObservationIgnored private var isActive = false
+    @ObservationIgnored private let loadSources: [any LoadableUpdateSource]
     @ObservationIgnored private var subscribers: [UUID: AsyncStream<Element>.Continuation] = [:]
     @ObservationIgnored private var previousUnavailable: [Bool] = []
     @ObservationIgnored private var previousResetRevisions: [UInt] = []
@@ -214,29 +161,16 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     @ObservationIgnored private var reportErrors: (@MainActor () -> (underlying: [any Error], mapped: (any Error)?))?
 
     init(
-        activations: [InputActivation],
-        loads: [InputLoad],
+        loadSources: [any LoadableUpdateSource],
         evaluate: @escaping @MainActor () -> CompositionEvaluation<Output>
     ) {
-        self.activations = activations
-        self.loads = loads
+        self.loadSources = loadSources
         self.evaluate = evaluate
         recompute()
     }
 
-    /// Runs input loading actions concurrently and waits for them to finish.
-    ///
-    /// Bucket and composition inputs load with the supplied policy by default.
-    /// Each shared child composition loads once per top-level call. Custom
-    /// actions receive the same policy and run for each declaration.
-    ///
-    /// Required action failures can fail the outcome. A bucket input with an
-    /// available snapshot still contributes its value. Read ``error`` for its
-    /// refresh failure. Siblings continue after a failure. An action retains its
-    /// previous error until it succeeds or fails again. Cancellation preserves
-    /// the action's error state. Overlapping calls run independently,
-    /// and the newest invocation of each action owns its error state. Bucket
-    /// loading policies still govern source work.
+    /// Loads each distinct source once, forwarding the policy through nested compositions.
+    /// Independent sources load concurrently and publish their own errors.
     public func load(using policy: LoadPolicy = .cached) async {
         let context = CompositionLoadContext(policy: policy)
         await withTaskCancellationHandler {
@@ -246,28 +180,15 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         }
     }
 
-    func load(in context: CompositionLoadContext) async {
+    fileprivate func load(in context: CompositionLoadContext) async {
         activeLoads += 1
-        let finishActivation = activate(forLoad: true)
-        defer {
-            finishActivation?()
-            activeLoads -= 1
-        }
+        defer { activeLoads -= 1 }
         await withTaskGroup(of: Void.self) { group in
-            for action in loads {
-                group.addTask { await action(context) }
+            for source in loadSources {
+                group.addTask { await context.load(source) }
             }
         }
         recompute()
-    }
-
-    @discardableResult
-    func activate(forLoad: Bool = false) -> (@MainActor () -> Void)? {
-        guard !isActive else { return nil }
-        isActive = true
-        let finishActivations = activations.compactMap { $0(forLoad) }
-        guard !finishActivations.isEmpty else { return nil }
-        return { for finish in finishActivations { finish() } }
     }
 
     private func recompute() {
@@ -311,7 +232,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
     }
 
     private func publish(_ update: Element) {
-        if case .reset = update { compositionResetRevision &+= 1 }
+        if case .reset = update { resetRevision &+= 1 }
         currentUpdate = update
         for continuation in subscribers.values { continuation.yield(update) }
     }
@@ -322,7 +243,6 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         let (stream, continuation) = AsyncStream<Element>.makeStream()
         let registration = Task { @MainActor in
             guard !Task.isCancelled else { continuation.finish(); return }
-            activate()
             subscribers[id] = continuation
             if case .result = currentUpdate { continuation.yield(currentUpdate) }
         }
@@ -365,7 +285,7 @@ final class BucketObservationLifetime: Sendable {
 }
 
 
-extension Composition: UpdateSource, CompositionResetSource, CompositionInputSource {}
+extension Composition: LoadableUpdateSource, CompositionResetSource, CompositionLoadGroup {}
 
 public extension Composition {
     /// Creates a live, observable and asynchronously iterable snapshot composition.
@@ -374,10 +294,7 @@ public extension Composition {
     /// A thrown transform error also fails the outcome. Loading is explicit through
     /// ``Composition/load(using:)``. Conditions select dependencies once.
     ///
-    /// Construction starts observing current values. Sequence subscriptions
-    /// start on the first read of ``latest`` or ``error``, iteration, or load.
-    /// Relationship inputs resolve keys once their root is available, using the
-    /// cached policy outside explicit loads.
+    /// Construction starts observing current values.
     ///
     /// - Parameters:
     ///   - inputs: The snapshot and observable dependencies in transform order.
@@ -392,24 +309,26 @@ public extension Composition {
         mapFailures: @escaping @MainActor ([any Error]) -> any Error = { CompositionError($0) },
         transform: @escaping @MainActor (repeat each Value) throws -> Output
     ) {
-        let inputs = inputs().makeInputs()
-        var activations: [InputActivation] = []
-        var loads: [InputLoad] = []
+        let inputs = inputs().inputs
+        var loadSources: [any LoadableUpdateSource] = []
         for input in repeat each inputs {
-            if let activation = input.activate { activations.append(activation) }
-            if let load = input.load { loads.append(load) }
+            if let source = input.loadSource { loadSources.append(source) }
         }
-        self.init(activations: activations, loads: loads) {
+        self.init(loadSources: loadSources) {
             let states = (repeat (each inputs).read())
             var unavailable: [Bool] = []
             var hasBlockingFailure = false
-            var reports: [(failures: [any Error], read: (@MainActor () -> [any Error]?)?)] = []
+            var reports: [@MainActor () -> [any Error]] = []
             var resetRevisions: [UInt] = []
             for state in repeat each states {
-                unavailable.append(state.unavailable)
+                if case .reset = state.outcome {
+                    unavailable.append(true)
+                } else {
+                    unavailable.append(false)
+                }
+                if case .result(.failure) = state.outcome { hasBlockingFailure = true }
                 resetRevisions.append(state.resetRevision)
-                hasBlockingFailure = hasBlockingFailure || !state.failures.isEmpty
-                reports.append((state.failures, state.reportedFailures))
+                reports.append(state.errors)
             }
             let outcome: CompositionEvaluation<Output>.Outcome
             var transformError: (any Error)?
@@ -419,14 +338,14 @@ public extension Composition {
                 outcome = .waiting
             } else {
                 do {
-                    outcome = .success(try transform(repeat (each states).value!))
+                    outcome = .success(try transform(repeat (each states).outcome.snapshot!))
                 } catch {
                     outcome = .failure
                     transformError = error
                 }
             }
             return .init(unavailable: unavailable, outcome: outcome, resetRevisions: resetRevisions) {
-                var errors = reports.flatMap { $0.read?() ?? $0.failures }
+                var errors = reports.flatMap { $0() }
                 if let transformError { errors.append(transformError) }
                 return (errors, errors.isEmpty ? nil : mapFailures(errors))
             }

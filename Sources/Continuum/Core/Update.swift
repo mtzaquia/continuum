@@ -31,18 +31,44 @@ nonisolated public enum Update<Snapshot: Sendable>: Sendable {
     case reset
 }
 
-/// The observable-source contract implemented by Continuum types.
-///
-/// Continuum provides conformances for ``Bucket``, ``BucketPartition``, and
-/// ``Composition``. Bridge external observable state with
-/// ``Input/init(update:load:)`` and asynchronous sequences with
-/// ``Input/init(updates:subscriptionOnLoad:load:)``.
+extension Update {
+    var snapshot: Snapshot? {
+        guard case .result(.success(let value)) = self else { return nil }
+        return .some(value)
+    }
+}
+
+/// An observable snapshot and its source-owned error.
 @MainActor
 public protocol UpdateSource<Snapshot>: AnyObject, Observable {
     associatedtype Snapshot: Sendable
 
-    /// The source's current observable outcome.
+    /// The current snapshot, failure, or unavailability.
     var latest: Update<Snapshot> { get }
+    /// An operation error that can coexist with an available snapshot.
+    var error: (any Error)? { get }
+}
+
+public extension UpdateSource {
+    var error: (any Error)? { nil }
+}
+
+// Keeps invalidation visible when Observation coalesces a reset and its replacement.
+@MainActor
+protocol CompositionResetSource: AnyObject {
+    var resetRevision: UInt { get }
+}
+
+/// A source that can participate in a composition load. Publish failures through
+/// `latest` or `error` so all observers see the same outcome.
+@MainActor
+public protocol LoadableUpdateSource<Snapshot>: UpdateSource, Sendable {
+    /// The value returned to direct callers of a load.
+    associatedtype LoadResult
+
+    /// Loads using the requested policy and publishes the outcome before returning.
+    @discardableResult
+    func load(using policy: LoadPolicy) async throws -> LoadResult
 }
 
 func makeSourceObservation<Source: UpdateSource & Sendable>(
@@ -118,12 +144,4 @@ func makeSourceObservation<Source: UpdateSource & Sendable>(
     })
 }
 
-// Bucket inputs load snapshots and use the bucket's published outcome and error.
-protocol BucketSnapshotSource: UpdateSource {
-    var error: (any Error)? { get }
-    func load(using policy: LoadPolicy) async throws -> Snapshot
-}
-
-extension Bucket: UpdateSource, BucketSnapshotSource where Scope == UnpartitionedBucketScope {}
-
-extension BucketPartition: UpdateSource, BucketSnapshotSource, CompositionResetSource {}
+extension Bucket: LoadableUpdateSource, CompositionResetSource {}

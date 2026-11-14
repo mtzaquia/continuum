@@ -41,7 +41,7 @@ nonisolated struct RemotePageContinuation<
 /// local sources miss, or when configured snapshot freshness requires remote
 /// validation. Cached-then-remote loads require and always reach it,
 /// while remote loads use it directly and supersede active source work. An
-/// advanced source can declare ``NextPage`` and a ``Load`` taking an entry ID.
+/// advanced source can declare a continuation and an entry loader.
 /// Successful remote snapshots write through to every writable ``LocalSource``
 /// before entering observable memory.
 nonisolated public struct RemoteSource<
@@ -49,67 +49,36 @@ nonisolated public struct RemoteSource<
 >: Sendable {
     let operation: @Sendable () async throws -> RemoteSnapshot<Space>
     let isPaginated: Bool
-    let loadEntry: Load<Space.Input, Space.Value>?
+    let loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)?
 
-    /// Creates a remote source.
+    /// Loads a complete snapshot and optionally loads individual entries.
     ///
-    /// - Parameter operation: An operation returning the complete snapshot.
-    @_disfavoredOverload
+    /// - Parameters:
+    ///   - load: The operation that returns the full snapshot.
+    ///   - loadEntry: An indexed entry lookup. The returned entry must match its requested ID.
     public init(
-        _ operation: @escaping @Sendable () async throws -> Space.Snapshot
+        _ load: @escaping @Sendable () async throws -> Space.Snapshot,
+        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)? = nil
     ) {
-        self.init(load: Load(operation))
-    }
-
-    /// Creates an advanced remote source.
-    ///
-    /// Declare a snapshot ``Load``, optional ``NextPage``, and an optional
-    /// indexed-entry ``Load`` that takes an ID:
-    ///
-    /// ```swift
-    /// RemoteSource {
-    ///     Load {
-    ///         try await client.posts()
-    ///     }
-    ///     Load { id in
-    ///         try await client.post(id: id)
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// - Parameter configuration: The ordered remote capabilities.
-    public init(
-        @RemoteSourceBuilder<Space>
-        _ configuration: () -> RemoteSource<Space>
-    ) {
-        self = configuration()
-    }
-
-    init(
-        load: Load<Void, Space.Snapshot>,
-        loadEntry: Load<Space.Input, Space.Value>? = nil
-    ) {
-        operation = {
-            RemoteSnapshot(
-                snapshot: try await load.operation(()),
-                nextPage: nil
-            )
-        }
+        operation = { RemoteSnapshot(snapshot: try await load(), nextPage: nil) }
         isPaginated = false
         self.loadEntry = loadEntry
     }
 
-    init<Cursor: Sendable>(
-        load: Load<Void, Page<Space.Snapshot, Cursor>>,
+    /// Loads an initial page and defines how to fetch and merge subsequent pages.
+    ///
+    /// - Parameters:
+    ///   - firstPage: The operation that returns the initial page.
+    ///   - nextPage: The continuation operation and merge behavior.
+    ///   - loadEntry: An optional lookup for individual indexed entries.
+    public init<Cursor: Sendable>(
+        _ firstPage: @escaping @Sendable () async throws -> Page<Space.Snapshot, Cursor>,
         nextPage: NextPage<Space.Snapshot, Cursor>,
-        loadEntry: Load<Space.Input, Space.Value>? = nil
+        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)? = nil
     ) {
         operation = {
-            let page = try await load.operation(())
-            return remoteSnapshot(
-                from: page,
-                nextPage: nextPage
-            )
+            let page = try await firstPage()
+            return remoteSnapshot(from: page, nextPage: nextPage)
         }
         isPaginated = true
         self.loadEntry = loadEntry

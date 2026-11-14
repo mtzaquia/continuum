@@ -22,7 +22,7 @@
 
 /// An application event stream that invalidates one atomic bucket snapshot.
 ///
-/// When the bucket receives an event, it performs ``BucketPartition/reset()``.
+/// When the bucket receives an event, it performs ``Bucket/reset()``.
 /// Reset clears observable memory and pagination, then sends `nil` to every writable
 /// ``LocalSource``. This prevents a later cached load from restoring a
 /// snapshot that the event declared stale.
@@ -31,7 +31,7 @@
 /// bucket's error. The bucket owns the observation task for its lifetime. A
 /// partitioned bucket starts one observation when each accessed partition is
 /// created.
-/// Await ``BucketPartition/reset()`` before exposing a new session when the
+/// Await ``Bucket/reset()`` before exposing a new session when the
 /// session transition needs to wait for invalidation.
 ///
 /// ```swift

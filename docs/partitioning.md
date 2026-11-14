@@ -8,7 +8,7 @@ nonisolated enum Purpose: Hashable, Sendable {
   case buy, sell
 }
 
-let accounts: PartitionedIdentifiedBucket<Purpose, Account> = Bucket(
+let accounts: PartitionedIdentifiedBucket<Purpose, Account> = PartitionedBucket(
   IndexedKey("accounts"),
   partitionedBy: Purpose.self
 ) { purpose in
@@ -21,7 +21,7 @@ try await buying.load()
 print(buying.values)
 ```
 
-The first access creates a `BucketPartition`. Equal keys return the same
+The first access creates a `Bucket`. Equal keys return the same
 partition. Each owns its values, errors, source work, persistence, and pagination.
 A load or reset of `.buy` does not affect `.sell`.
 
@@ -55,13 +55,12 @@ let comparison = Composition {
 ```
 
 Read `latest` and iterate on the selected partition. `comparison.load()` loads
-both selected partitions with `.cached`. Use `Input(accounts[.sell]) { _ in }`
+both selected partitions with `.cached`. Use `Input(accounts[.sell], loads: false)`
 to observe that partition without loading it through the composition.
 
 Use [entry loading](loading.md#load-one-indexed-entry) to fetch an individual
-entity from an indexed collection. For
-[relationship resolution](composition.md#resolve-relationships), pass the indexed
-bucket or select a query partition explicitly; foreign keys identify entries.
+entity from an indexed collection. Select the partition first so the entry
+load uses the correct collection and source configuration.
 
 ## Bound partition identities
 

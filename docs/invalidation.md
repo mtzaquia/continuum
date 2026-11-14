@@ -61,9 +61,8 @@ unavailable. If replacement data is already available when observation resumes,
 it emits that result directly.
 
 Compositions preserve required-input reset history, including through nesting.
-Optional resets contribute nil. A resolved root also discards its relationship
-values; resetting a selected required partition invalidates the pair without
-reloading it. Unrelated inputs keep observing and are not reset or restarted.
+Optional resets contribute nil. Resetting a required source clears the result
+until the inputs can produce it again. Unrelated sources keep their state.
 [Composition outcomes →](composition.md#observe-outcomes-and-resets)
 
 Next: [Operation ordering](operation-ordering.md) · [Compositions](composition.md)

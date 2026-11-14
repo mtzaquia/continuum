@@ -10,7 +10,7 @@ struct CompositionTests {
         let favorites = Bucket(IndexedKey<Int, Favorite>("composition.favorites", indexedBy: \.id)) {
             LocalSource { [Favorite(id: 1)] }
         }
-        let partitioned = Bucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in LocalSource { 42 } }
+        let partitioned = PartitionedBucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in LocalSource { 42 } }
         let preferences = Preferences()
         try await user.load()
         try await partitioned["selected"].load()
@@ -95,8 +95,8 @@ struct CompositionTests {
     @Test("Observable update inputs gate, fail, reset, and recover from repository phase changes")
     func observableUpdateAvailability() async {
         let repository = RepositoryState<Int?>()
-        let required = Composition { Input(update: { repository.update }) } transform: { $0 ?? -2 }
-        let optionalInput: Input<Int?> = Input(update: { repository.update }).optional()
+        let required = Composition { Input(repository) } transform: { $0 ?? -2 }
+        let optionalInput: Input<Int?> = Input(repository).optional()
         let optional = Composition { optionalInput } transform: { $0 ?? -1 }
         #expect(isReset(required.latest))
         #expect(success(optional.latest) == -1)
@@ -123,54 +123,17 @@ struct CompositionTests {
         #expect(success(await requiredUpdates.next()) == 8)
     }
 
-    @Test("Observable update inputs forward policies and report the source failure once")
-    func observableUpdateLoad() async {
-        let repository = RepositoryState<Int>()
-        var policies: [LoadPolicy] = []
-        let composition = Composition {
-            Input(update: { repository.update }, load: { policy in
-                policies.append(policy)
-                switch policy {
-                case .cached: break
-                case .cachedThenRemote: throw NumberedError(number: 1)
-                case .remote:
-                    repository.phase = .failed(NumberedError(number: 2))
-                    throw NumberedError(number: 3)
-                }
-            })
-        } transform: { $0 + 1 }
-
-        #expect(policies.isEmpty)
-        await composition.load(using: .cached)
-        #expect(isReset(composition.latest))
-        await composition.load(using: .cachedThenRemote)
-        let actionFailure = composition.error as? CompositionError
-        #expect(actionFailure?.errors.compactMap { ($0 as? NumberedError)?.number } == [1])
-        await composition.load(using: .remote)
-        let sourceFailure = composition.error as? CompositionError
-        #expect(sourceFailure?.errors.compactMap { ($0 as? NumberedError)?.number } == [2])
-        #expect(policies == [.cached, .cachedThenRemote, .remote])
-
-        var updates = composition.makeAsyncIterator()
-        #expect(isFailure(await updates.next()))
-        repository.phase = .loaded(8)
-        #expect(success(await updates.next()) == 9)
-        #expect(composition.error == nil)
-    }
-
     @Test("Retry keeps an observable query's load failure until success")
     func observableUpdateRetry() async {
-        let repository = RepositoryState<Int>()
         let (started, start) = AsyncStream<Void>.makeStream()
         let (release, unblock) = AsyncStream<Void>.makeStream()
-        let composition = Composition {
-            Input(update: { repository.update }, load: { policy in
-                guard policy == .remote else { throw NumberedError(number: 1) }
-                start.yield(())
-                for await _ in release { break }
-                repository.phase = .loaded(8)
-            })
-        } transform: { $0 + 1 }
+        let repository = QuerySource<Int> { policy in
+            guard policy == .remote else { throw NumberedError(number: 1) }
+            start.yield(())
+            for await _ in release { break }
+            return 8
+        }
+        let composition = Composition { Input(repository) } transform: { $0 + 1 }
 
         await composition.load()
         var updates = composition.makeAsyncIterator()
@@ -199,8 +162,8 @@ struct CompositionTests {
         repository.phase = .loaded(1)
         permissions.phase = .loaded(2)
         let inner = Composition {
-            Input(update: { repository.update })
-            Input(update: { permissions.update })
+            Input(repository)
+            Input(permissions)
         } transform: { $0 + $1 }
         let middle = Composition { Input(inner) } transform: { $0 * 2 }
         let outer = Composition { Input(middle) } transform: { $0 + 1 }
@@ -223,27 +186,13 @@ struct CompositionTests {
     func observableUpdateCoalescing() async {
         let repository = RepositoryState<Int>()
         repository.phase = .loaded(1)
-        let composition = Composition { Input(update: { repository.update }) } transform: { $0 }
+        let composition = Composition { Input(repository) } transform: { $0 }
         var updates = composition.makeAsyncIterator()
         #expect(success(await updates.next()) == 1)
 
         repository.phase = .idle
         repository.phase = .loaded(2)
         #expect(success(await updates.next()) == 2)
-    }
-
-    @Test("Observable array inputs can supply a relationship root")
-    func observableUpdateRelationshipRoot() async {
-        let repository = RepositoryState<[Favorite]>()
-        let composition = Composition {
-            Input(update: { repository.update }).resolving(\.id) { id, _ in "favorite-\(id)" }
-        } transform: { favorites, names in favorites.compactMap { names[$0.id] } }
-        #expect(isReset(composition.latest))
-        var updates = composition.makeAsyncIterator()
-        repository.phase = .loaded([Favorite(id: 7)])
-        #expect(success(await updates.next()) == ["favorite-7"])
-        repository.phase = .idle
-        #expect(isReset(await updates.next()))
     }
 
     @Test("Builder branches preserve typed slots, including multiple optional inputs", arguments: [false, true])
@@ -279,7 +228,7 @@ struct CompositionTests {
             }
             RemoteSource { 2 }
         }
-        let partitioned = Bucket(Key<String>("composition.auto.partition"), partitionedBy: String.self) { key in
+        let partitioned = PartitionedBucket(Key<String>("composition.auto.partition"), partitionedBy: String.self) { key in
             LocalSource {
                 await calls.record(key)
                 return "local-\(key)"
@@ -306,54 +255,28 @@ struct CompositionTests {
         #expect(composition.error == nil)
     }
 
-    @Test("An explicit bucket action replaces automatic loading and receives the policy")
-    func customLoading() async {
-        let source = Bucket(Key<Int>("composition.custom")) {
-            LocalSource { 7 }
-            RemoteSource { throw TestError.failed }
-        }
-        let preferences = Preferences()
-        var calls: [String] = []
-        let composition = Composition {
-            Input(source) { policy in
-                if case .remote = policy { calls.append("snapshot") }
-                try await source.load()
-            }
-            Input { preferences.language } load: { policy in
-                if case .remote = policy { calls.append("value") }
-                preferences.language = "nl"
-            }
-        } transform: { "\($0 + 1):\($1)" }
-        #expect(calls.isEmpty)
-        await composition.load(using: .remote)
-        #expect(calls.sorted() == ["snapshot", "value"])
-        #expect(success(composition.latest) == "8:nl")
-        #expect(composition.error == nil)
-        #expect(!composition.isLoading)
-    }
-
-    @Test("Required loading errors fail output; optional loading errors do not cancel siblings")
+    @Test("Required source failures block output and optional failures do not cancel siblings")
     func actionErrors() async {
-        let source = Source<Int>(.result(.success(1)))
-        var shouldFail = true
         var siblingFinished = false
+        let required = QuerySource<Int> { policy in
+            if policy == .cached { throw TestError.failed }
+            return 1
+        }
+        let optional = QuerySource<Int> { _ in
+            await Task.yield()
+            siblingFinished = true
+            throw TestError.failed
+        }
         let composition = Composition {
-            Input(source) { _ in
-                if shouldFail { throw TestError.failed }
-            }
-            Input { 2 } load: { _ in
-                await Task.yield()
-                siblingFinished = true
-                throw TestError.failed
-            }
-            .optional()
+            Input(required)
+            Input(optional).optional()
         } transform: { $0 + ($1 ?? 0) }
         await composition.load()
         #expect(isFailure(composition.latest))
         #expect(siblingFinished)
-        shouldFail = false
-        await composition.load()
+        await composition.load(using: .remote)
         #expect(success(composition.latest) == 1)
+        #expect((composition.error as? CompositionError)?.errors.count == 1)
     }
 
     @Test("A thrown transform error is a recoverable outcome")
@@ -417,7 +340,7 @@ struct CompositionTests {
 
     @Test("A failed partition refresh retains its value alongside an observation-only bucket")
     func retainedPartitionAfterCompositionLoad() async throws {
-        let bucket = Bucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in
+        let bucket = PartitionedBucket(Key<Int>("composition.partition"), partitionedBy: String.self) { _ in
             LocalSource { 10 }
             RemoteSource { throw TestError.failed }
         }
@@ -427,7 +350,7 @@ struct CompositionTests {
         try await sibling.load()
         let composition = Composition {
             Input(partition)
-            Input(sibling) { _ in }
+            Input(sibling, loads: false)
         } transform: { $0 + $1 }
         var current = composition.makeAsyncIterator()
         #expect(success(await current.next()) == 11)
@@ -452,19 +375,19 @@ struct CompositionTests {
         #expect(success(composition.latest) == 12)
     }
 
-    @Test("Overlapping loads retain loading state and ignore obsolete action outcomes",
+    @Test("Overlapping loads retain loading state and ignore obsolete source outcomes",
           arguments: [false, true])
     func overlappingLoads(obsoleteLoadFails: Bool) async {
         let (started, start) = AsyncStream<Void>.makeStream()
         let (release, unblock) = AsyncStream<Void>.makeStream()
-        let composition = Composition {
-            Input { 1 } load: { policy in
-                guard policy == .cached else { throw NumberedError(number: 2) }
-                start.yield(())
-                for await _ in release { break }
-                if obsoleteLoadFails { throw NumberedError(number: 1) }
-            }
-        } transform: { $0 + 1 }
+        let source = QuerySource { policy in
+            guard policy == .cached else { throw NumberedError(number: 2) }
+            start.yield(())
+            for await _ in release { break }
+            if obsoleteLoadFails { throw NumberedError(number: 1) }
+            return 1
+        }
+        let composition = Composition { Input(source) } transform: { $0 + 1 }
         let first = Task { await composition.load() }
         var starts = started.makeAsyncIterator()
         _ = await starts.next()
@@ -483,14 +406,14 @@ struct CompositionTests {
         let (started, start) = AsyncStream<Void>.makeStream()
         let (blocked, _) = AsyncStream<Void>.makeStream()
         var cancelled = false
-        let composition = Composition {
-            Input { 1 } load: { policy in
-                guard policy == .remote else { throw TestError.failed }
-                start.yield(())
-                for await _ in blocked {}
-                cancelled = Task.isCancelled
-            }
-        } transform: { $0 + 1 }
+        let source = QuerySource { policy in
+            guard policy == .remote else { throw TestError.failed }
+            start.yield(())
+            for await _ in blocked {}
+            cancelled = Task.isCancelled
+            return 1
+        }
+        let composition = Composition { Input(source) } transform: { $0 + 1 }
         await composition.load()
         let loading = Task { await composition.load(using: .remote) }
         var starts = started.makeAsyncIterator()
@@ -503,23 +426,23 @@ struct CompositionTests {
         #expect((composition.error as? CompositionError)?.errors.first is TestError)
     }
 
-    @Test("Cancelling a top-level load cancels a shared child's action")
+    @Test("Cancelling a top-level load cancels a shared child's source")
     func sharedChildCancellation() async {
         let (started, start) = AsyncStream<Void>.makeStream()
         var calls = 0
         var cancelled = false
-        let child = Composition {
-            Input { 1 } load: { _ in
-                calls += 1
-                start.yield(())
-                do {
-                    try await Task.sleep(for: .seconds(5))
-                } catch {
-                    cancelled = Task.isCancelled
-                    throw error
-                }
+        let source = QuerySource(latest: .result(.success(1))) { _ in
+            calls += 1
+            start.yield(())
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                cancelled = Task.isCancelled
+                throw error
             }
-        } transform: { $0 }
+            return 1
+        }
+        let child = Composition { Input(source) } transform: { $0 }
         let parent = Composition {
             Input(child)
             Input(child)
@@ -588,12 +511,12 @@ struct CompositionTests {
 
     @Test("Flattened optional inputs retain loading actions and suppress their errors")
     func flattenedLoading() async {
-        let preferences = Preferences()
         var calls = 0
-        let input = Input { Optional(preferences.language) } load: { policy in
+        let source = QuerySource<String?>(latest: .result(.success("en"))) { policy in
             if case .remote = policy { calls += 1 }
             throw TestError.failed
         }
+        let input = Input(source)
         let optionalInput = input.optional()
         let _: Input<String?> = optionalInput
         let composition = Composition { optionalInput } transform: { $0 ?? "missing" }
@@ -646,18 +569,16 @@ struct CompositionTests {
         #expect(success(await iterator.next()) == 18)
     }
 
-    @Test("Nested inputs forward the policy unless a closure overrides loading",
+    @Test("Nested inputs forward the policy unless loading is disabled",
           arguments: [LoadPolicy.cached, .cachedThenRemote, .remote])
     func nestedLoading(policy: LoadPolicy) async {
-        let source = Source<Int>()
         var policies: [LoadPolicy] = []
-        let inner = Composition {
-            Input(source) { policy in
-                policies.append(policy)
-                source.update = .result(.success(4))
-            }
-        } transform: { $0 * 2 }
-        let passive = Composition { Input(inner) { _ in } } transform: { $0 + 1 }
+        let source = QuerySource { policy in
+            policies.append(policy)
+            return 4
+        }
+        let inner = Composition { Input(source) } transform: { $0 * 2 }
+        let passive = Composition { Input(inner, loads: false) } transform: { $0 + 1 }
         await passive.load(using: policy)
         #expect(policies.isEmpty)
         #expect(isReset(passive.latest))
@@ -675,11 +596,6 @@ struct CompositionTests {
         #expect(success(passive.latest) == 9)
         #expect(policies == [policy])
 
-        let custom = Composition {
-            Input(inner) { _ in await inner.load(using: .cached) }
-        } transform: { $0 }
-        await custom.load(using: .remote)
-        #expect(policies == [policy, .cached])
     }
 
     @Test("A child shared across branches loads once for each overlapping or subsequent call")
@@ -687,15 +603,15 @@ struct CompositionTests {
         let (started, start) = AsyncStream<Void>.makeStream()
         let (release, unblock) = AsyncStream<Void>.makeStream()
         var policies: [LoadPolicy] = []
-        let child = Composition {
-            Input { 1 } load: { policy in
-                policies.append(policy)
-                if policies.count == 1 {
-                    start.yield(())
-                    for await _ in release {}
-                }
+        let source = QuerySource { policy in
+            policies.append(policy)
+            if policies.count == 1 {
+                start.yield(())
+                for await _ in release {}
             }
-        } transform: { $0 }
+            return 1
+        }
+        let child = Composition { Input(source) } transform: { $0 }
         let left = Composition { Input(child) } transform: { $0 }
         let right = Composition { Input(child) } transform: { $0 }
         let parent = Composition {
@@ -723,6 +639,70 @@ struct CompositionTests {
         #expect(success(parent.latest) == 3)
     }
 
+    @Test("Built-in sources load once across direct and nested inputs per call")
+    func sharedBucketLoading() async {
+        let bucketCalls = LocalLoadCalls()
+        let partitionCalls = LocalLoadCalls()
+        let bucket = Bucket(Key<Int>("composition.shared-bucket")) {
+            RemoteSource {
+                await bucketCalls.record("bucket")
+                return 3
+            }
+        }
+        let partitions = PartitionedBucket(Key<Int>("composition.shared-partition"), partitionedBy: String.self) { key in
+            RemoteSource {
+                await partitionCalls.record(key)
+                return 4
+            }
+        }
+        let selected = partitions["selected"]
+        let other = partitions["other"]
+        let child = Composition {
+            Input(bucket)
+            Input(selected)
+        } transform: { $0 + $1 }
+        let parent = Composition {
+            Input(child)
+            Input(bucket)
+            Input(selected).optional()
+            Input(other)
+        } transform: { $0 + $1 + ($2 ?? 0) + $3 }
+
+        for call in 1...2 {
+            await parent.load(using: .remote)
+            #expect(await bucketCalls.count(for: "bucket") == call)
+            #expect(await partitionCalls.count(for: "selected") == call)
+            #expect(await partitionCalls.count(for: "other") == call)
+            #expect(success(parent.latest) == 18)
+        }
+    }
+
+    @Test("Reset clears a query error and fences an already running retry")
+    func queryResetDuringRetry() async {
+        let (started, signal) = AsyncStream<Void>.makeStream()
+        let (resume, unblock) = AsyncStream<Void>.makeStream()
+        let query = QuerySource<Int> { policy in
+            if policy == .remote {
+                signal.yield(())
+                for await _ in resume { break }
+            }
+            throw NumberedError(number: 1)
+        }
+        let composition = Composition {
+            Input(query)
+        } transform: { $0 }
+        await composition.load()
+        let retry = Task { await composition.load(using: .remote) }
+        var starts = started.makeAsyncIterator()
+        _ = await starts.next()
+
+        query.reset()
+        unblock.finish()
+        await retry.value
+        #expect(isReset(composition.latest))
+        #expect(composition.error == nil)
+    }
+
     @Test("New parents start from the current outcome without replaying historical resets")
     func nestedResetBaseline() async {
         let a = Source<Int>(.result(.success(1)))
@@ -745,7 +725,7 @@ struct CompositionTests {
     @Test("Buckets, partitions and compositions share observable outcomes and direct iteration")
     func uniformSources() async throws {
         let bucket = Bucket(Key<Int>("uniform.bucket")) { LocalSource { 3 } }
-        let partitions = Bucket(Key<Int>("uniform.partition"), partitionedBy: String.self) { _ in LocalSource { 4 } }
+        let partitions = PartitionedBucket(Key<Int>("uniform.partition"), partitionedBy: String.self) { _ in LocalSource { 4 } }
         let partition = partitions["one"]
         #expect(isReset(bucket.latest))
         #expect(isReset(partition.latest))
@@ -770,7 +750,7 @@ struct CompositionTests {
             try await bucket.load()
         })
 
-        let partitions = Bucket(
+        let partitions = PartitionedBucket(
             Key<Int>("uniform.observed-partition"),
             partitionedBy: String.self
         ) { _ in LocalSource { 2 } }
@@ -1000,16 +980,22 @@ nonisolated private struct Favorite: Sendable { let id: Int }
 private enum TestError: Error { case failed }
 
 private actor LocalLoadCalls {
-    private(set) var keys: Set<String> = []
+    private var counts: [String: Int] = [:]
 
-    func record(_ key: String) { keys.insert(key) }
+    var keys: Set<String> { Set(counts.keys) }
+
+    func record(_ key: String) {
+        counts[key, default: 0] += 1
+    }
+
+    func count(for key: String) -> Int { counts[key, default: 0] }
 }
 
 @MainActor @Observable
 private final class Preferences { var language = "en" }
 
 @MainActor @Observable
-private final class RepositoryState<Value: Sendable> {
+private final class RepositoryState<Value: Sendable>: UpdateSource {
     enum Phase {
         case idle
         case loaded(Value)
@@ -1018,7 +1004,7 @@ private final class RepositoryState<Value: Sendable> {
 
     var phase: Phase = .idle
 
-    var update: Update<Value> {
+    var latest: Update<Value> {
         switch phase {
         case .idle: .reset
         case .loaded(let value): .result(.success(value))
@@ -1045,6 +1031,39 @@ private func isReset<T>(_ update: Update<T>?) -> Bool {
 private func isFailure<T>(_ update: Update<T>?) -> Bool {
     if case .result(.failure) = update { return true }
     return false
+}
+
+@MainActor @Observable
+private final class QuerySource<Value: Sendable>: LoadableUpdateSource {
+    private(set) var latest: Update<Value>
+    private var generation: UInt = 0
+    private let fetch: @MainActor (LoadPolicy) async throws -> Value
+
+    init(
+        latest: Update<Value> = .reset,
+        fetch: @escaping @MainActor (LoadPolicy) async throws -> Value
+    ) {
+        self.latest = latest
+        self.fetch = fetch
+    }
+
+    func load(using policy: LoadPolicy) async {
+        generation &+= 1
+        let request = generation
+        do {
+            let value = try await fetch(policy)
+            guard generation == request, !Task.isCancelled else { return }
+            latest = .result(.success(value))
+        } catch {
+            guard generation == request, !Task.isCancelled, !(error is CancellationError) else { return }
+            latest = .result(.failure(error))
+        }
+    }
+
+    func reset() {
+        generation &+= 1
+        latest = .reset
+    }
 }
 
 private struct NumberedError: Error { let number: Int }

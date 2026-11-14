@@ -7,10 +7,10 @@ fixture uses Ensemble 3's `@ViewDataSource` to check that a failed refresh with
 retained data delivers success to existing and new bindings while the error stays
 observable on the bucket and composition. It also covers sibling changes,
 initial silence, reset-before-failure clearing, and retry for nested compositions
-and relationships.
+and repository-owned entry queries.
 
 By default, Ensemble must be checked out beside Continuum. The fixture was
-verified with Ensemble `v3.0.0-beta.1`. From Continuum's root, run
+verified with Ensemble `v3.0.0-beta.3`. From Continuum's root, run
 
 ```sh
 swift test --package-path IntegrationTests/EnsembleConsumer

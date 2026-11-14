@@ -57,15 +57,14 @@ a failed reset restores the original interval with the previous snapshot.
 
 ## Load one indexed entry
 
-Add a `Load` closure that receives an ID after the snapshot `Load` or, for a
-paginated source, after `NextPage`.
+Pass a `loadEntry` closure that receives an ID when configuring the remote source.
 
 ```swift
 let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
-  RemoteSource {
-    Load { try await client.authors() }
-    Load { id in try await client.author(id: id) }
-  }
+  RemoteSource(
+    { try await client.authors() },
+    loadEntry: { id in try await client.author(id: id) }
+  )
 }
 
 let author = try await authors.load(id: authorID, using: .remote)
@@ -99,8 +98,10 @@ Reset and superseding collection operations cancel pending entry work.
 
 A failed refresh throws to its caller and leaves the established snapshot
 available to existing and new observers. If a mutation or reset rolls back,
-observers receive the restored snapshot when one existed. A cached memory hit
-preserves the current error. Starting source work or a mutation clears it.
+observers receive the restored snapshot when one existed. A collection retry
+preserves the current error until it succeeds or fails again, including while
+displaying an interim cached snapshot. A cached memory hit preserves the
+error. An entry fetch, mutation, or reset clears it.
 Successful remote loads finish local persistence before publishing.
 [Persistence details →](persistence.md)
 
@@ -129,12 +130,11 @@ let feed = Composition {
 await feed.load(using: .remote)
 ```
 
-Bucket and nested composition inputs load automatically with the policy passed
-to the composition. Pass a custom closure to override the bucket loader, or use
-`Input(repository.posts) { _ in }` to observe the snapshot without loading it.
-Independent inputs load concurrently. A resolved input loads its root before
-its related keys. `load` returns `Void`. An available bucket snapshot continues
-to contribute its value after a failed refresh. Observe the composition's
-`error` to present that failure. [Composition loading →](composition.md#load-the-composition)
+Each loadable source receives the requested policy once per composition load,
+including across nested branches. Use `Input(repository.posts, loads: false)`
+for observation alone. Independent sources load concurrently. An available
+bucket snapshot continues to contribute its value after a failed refresh.
+Observe `composition.error` to present that failure.
+[Composition loading →](composition.md#load-the-composition)
 
 Next: [Persistence](persistence.md) · [Compositions](composition.md)

@@ -14,7 +14,7 @@ struct FreshnessTests {
             String.Type,
             @escaping @MainActor @Sendable (String) -> Configuration
         ) -> PartitionedValueBucket<String, Int> = { key, partition, configuration in
-            Bucket(key, partitionedBy: partition, configuration: configuration)
+            PartitionedBucket(key, partitionedBy: partition, configuration: configuration)
         }
         let service = Service()
         let configuration = Configuration(remoteSources: [
@@ -287,7 +287,7 @@ struct FreshnessTests {
     @Test("The public partition initializer forwards freshness to each selected partition")
     func partitionedAPI() async throws {
         let service = Service()
-        let bucket = Bucket(
+        let bucket = PartitionedBucket(
             Key<Int>("freshness.partitions"),
             partitionedBy: String.self,
             staleAfter: .zero
@@ -306,16 +306,16 @@ struct FreshnessTests {
         let time = TestTime()
         let service = Service()
         let key = IndexedKey<Int, Int>("freshness.pages", indexedBy: { $0 })
-        let bucket: BucketPartition<IndexedKey<Int, Int>, MutationAction<IndexedKey<Int, Int>>> = BucketPartition(
+        let bucket: Bucket<IndexedKey<Int, Int>, MutationAction<IndexedKey<Int, Int>>> = Bucket(
             key,
             staleAfter: .seconds(10),
             now: { time.instant },
             configuration: BucketConfiguration(remoteSources: [
-                RemoteSource {
-                    Load { Page(values: [try await service.load()], next: 1) }
-                    NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
-                    Load { (id: Int) in id }
-                },
+                RemoteSource(
+                    { Page(values: [try await service.load()], next: 1) },
+                    nextPage: NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) },
+                    loadEntry: { (id: Int) in id }
+                ),
             ])
         )
         try await bucket.load()
@@ -363,8 +363,8 @@ struct FreshnessTests {
         staleAfter: Duration? = .seconds(10),
         @BucketBuilder<Key<Int>> configuration:
             () -> BucketConfiguration<Key<Int>, MutationAction<Key<Int>>>
-    ) -> BucketPartition<Key<Int>, MutationAction<Key<Int>>> {
-        BucketPartition(
+    ) -> Bucket<Key<Int>, MutationAction<Key<Int>>> {
+        Bucket(
             Key<Int>("freshness.test"),
             staleAfter: staleAfter,
             now: { time.instant },

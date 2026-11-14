@@ -16,11 +16,16 @@ still describe a bucket built with `Key<Value>`.
 | `bucketUpdates(observing:transform:)` | Build and iterate a `Composition` with one `Input` per source. |
 | Synchronous `reset()`, `reset(including: .localSources)`, `ResetScope` | `try await reset()` clears memory and writable local snapshots. |
 
-Configured bucket initializers default `staleAfter` to `nil`. `Input(source)`
-and `Input(source, load:)` use one initializer with an optional load action.
-Direct calls keep their existing spelling. If you pass an initializer as a
-function value, use the full signature or wrap the call in a closure to use
-the defaults.
+## Select partitions from a container
+
+Create partitioned buckets with `PartitionedBucket(key, partitionedBy: …)`.
+Subscripting the container returns the same `Bucket<Space, Operation>` type
+used for a standalone bucket. Existing aliases such as `ValueBucket`,
+`IndexedBucket`, and `PartitionedValueBucket` still work. Replace a direct
+`BucketPartition<Space, Operation>` annotation with `Bucket<Space, Operation>`.
+If you spell the container type directly, use
+`PartitionedBucket<Partition, Space, Operation>`. For a closure-based mutation,
+the operation type is `MutationAction<Space>`.
 
 ## Migrate mutations and entry loaders
 
@@ -37,18 +42,25 @@ Establish the initial snapshot with `load()`. Use `LocalSource` for a snapshot
 that starts in memory. An edit can return `nil` to clear its snapshot, or an
 empty array to keep an established empty collection. [Mutation guide](remote-mutations.md)
 
-When spelling the generic types directly, `Bucket` and `BucketPartition`
-now take the operation type as their last argument. The existing bucket
+When spelling `Bucket<Space, Operation>` directly, supply its operation type as
+the last argument. The existing bucket
 aliases use `MutationAction<Space>` for closure-based mutations. For a typed
 handler, use the corresponding `Mutable` alias, such as
 `MutableIdentifiedBucket<Card, CardOperation>` or
 `PartitionedMutableIdentifiedBucket<ProfileID, Card, CardOperation>`.
 [Typed mutation aliases](remote-mutations.md#annotate-a-typed-bucket)
 
-Replace `LoadEntry { id in … }` with `Load { id in … }`. The call site
-`load(id:using:)` keeps its spelling.
-If you explicitly spell `Load`'s generic arguments, use `Load<Void, Snapshot>`
-for a complete snapshot and `Load<ID, Value>` for an entry.
+## Name remote loading capabilities
+
+Use `RemoteSource { … }` for a snapshot loader. For indexed entry loading,
+use `RemoteSource({ … }, loadEntry: …)`. For pagination, use
+`RemoteSource({ … }, nextPage: …, loadEntry: …)` and omit `loadEntry`
+when there is no indexed lookup. The `Load` wrapper and nested builder are
+removed. Calls to `load(id:using:)` and `loadNext()` keep their spelling.
+
+Replace the generic `MutableBucket` and `PartitionedMutableBucket` aliases
+with `Bucket` and `PartitionedBucket`. The value, indexed, and identified
+aliases still accept the operation type where their names include `Mutable`.
 
 ## Observe refresh errors separately
 
@@ -68,21 +80,12 @@ availability. Pagination continues to report errors through `nextPageError`.
 
 ## Pass buckets directly into compositions
 
-Remove any custom `UpdateSource` adapter whose purpose was to turn a failure
-with retained data back into success. Pass the bucket or selected partition
-directly to `Input`, including when you configure a load action. The transform
-can still run as other inputs change. Read `composition.error` for the current
-errors, including failures from optional and nested inputs.
-
-`composition.load(using:)` now loads bucket and selected partition inputs with
-the requested policy. Remove closures that only forward the policy to the
-bucket. Keep custom actions, and pass `Input(bucket) { _ in }` for a bucket
-that should only be observed.
-
-Nested composition inputs also load with the parent's policy. Remove closures
-that only forward the policy to a child. Use `Input(child) { _ in }` to keep
-the child observation-only through that input. Each top-level call loads shared
-children once across the inputs that forward automatically.
+Pass a bucket, selected partition, or nested composition directly to
+`Input(source)`. The requested load policy is forwarded once to each distinct
+source. Use `Input(source, loads: false)` for observation alone. Read
+`composition.error` for input and transform errors, including errors while
+a snapshot remains available. Call reset on the bucket or query that owns the
+data. Compositions observe those resets.
 
 By default, failures in `latest` now carry a `CompositionError`, even for a
 single error. Inspect its `errors` array to recover the underlying types. A
@@ -91,12 +94,14 @@ optional input errors and any error thrown by the transform. Its return value
 sets `composition.error` and is shared by `latest` whenever the outcome fails.
 [Error mapping →](composition.md#observe-composition-errors)
 
-## Start sequence inputs on first use
+## Move custom input lifecycle into sources
 
-`Input(updates:)` starts its subscription when the composition is first read
-through `latest` or `error`, iterated, or loaded. If you relied on construction
-to start a subscription, read `latest` at that point. Calling `load()` also
-runs configured loading actions. [Sequence inputs →](composition.md#bridge-result-sequences)
+Replace `Input(update:load:)`, `Input(updates:)`, and per-input load closures
+with an observable source. Implement `LoadableUpdateSource` when the composition
+should forward loads. If you used `.resolving`, keep the lookup and its state in
+the repository query and call the selected bucket's `load(id:using:)` there.
+Pass the query to `Input(query)`. Its published snapshot and error are visible
+to every consumer. [Repository queries](composition.md#compose-a-repository-query)
 
 ## Update Ensemble error presentation
 

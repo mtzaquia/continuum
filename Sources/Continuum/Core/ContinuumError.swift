@@ -34,7 +34,7 @@ public enum ContinuumError: LocalizedError, Sendable {
     /// The paginated key space has not loaded its initial remote page.
     case initialPageNotLoaded(namespace: String)
 
-    /// The indexed bucket has no indexed-entry ``Load`` for a required fetch.
+    /// The indexed bucket has no indexed entry loader for a required fetch.
     case missingEntrySource(namespace: String)
 
     /// The source returned an entry whose index differs from the requested index.
@@ -55,9 +55,9 @@ public enum ContinuumError: LocalizedError, Sendable {
             "Snapshot edits in a bucket mutation must run sequentially."
 
         case .missingEntrySource(let namespace):
-            "No indexed-entry Load is configured for data bucket \(namespace.debugDescription)."
+            "No indexed entry loader is configured for data bucket \(namespace.debugDescription)."
         case .mismatchedEntryIdentity(let namespace):
-            "The indexed-entry Load returned a different index for data bucket \(namespace.debugDescription)."
+            "The indexed entry loader returned a different index for data bucket \(namespace.debugDescription)."
         case .missingRemoteSource(let namespace):
             "No RemoteSource is configured for data bucket \(namespace.debugDescription)."
         case .missingPaginatedRemoteSource(let namespace):

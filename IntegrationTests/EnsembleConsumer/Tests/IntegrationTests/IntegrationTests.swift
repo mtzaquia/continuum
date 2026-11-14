@@ -4,9 +4,13 @@ import Observation
 import Testing
 
 @MainActor @Observable
-final class Source: UpdateSource {
+final class Source: LoadableUpdateSource {
     var update: Update<Int> = .reset
     var latest: Update<Int> { update }
+    var valueToLoad: Int?
+    func load(using policy: LoadPolicy) async {
+        if let valueToLoad { update = .result(.success(valueToLoad)) }
+    }
 }
 
 enum Failure: Error { case test }
@@ -97,14 +101,13 @@ struct IntegrationTests {
     @MainActor @Test func relationshipResetFailureAndRetry() async throws {
         let service = RelationshipService()
         let names = Bucket(IndexedKey<Int, NamedEntry>("ensemble.names")) {
-            RemoteSource {
-                Load { [NamedEntry]() }
-                Load { id in NamedEntry(id: id, name: try await service.name(id)) }
-            }
+            RemoteSource(
+                { [NamedEntry]() },
+                loadEntry: { id in NamedEntry(id: id, name: try await service.name(id)) }
+            )
         }
-        let child = Composition {
-            Input { [1] }.resolving(\.self, from: names)
-        } transform: { _, names in names[1]?.name ?? "" }
+        let query = EntryQuery(names: names)
+        let child = Composition { Input(query) } transform: { $0.name }
         let composition = Composition {
             Input(child)
         } transform: { $0 }
@@ -117,7 +120,7 @@ struct IntegrationTests {
             if case .result(.success("name-1")) = update { break }
         }
         if case .available("name-1") = data.latestValue {} else { Issue.record("Expected resolved name") }
-        try await names.reset()
+        try await query.reset()
         await service.setFailure(true)
         await composition.load(using: .remote)
         var sawReset = false
@@ -138,9 +141,11 @@ struct IntegrationTests {
     @MainActor @Test func bindingResetFailureAndRetry() async {
         let a = Source()
         let b = Source()
+        a.valueToLoad = 10
+        b.valueToLoad = 20
         let inner = Composition {
-            Input(a) { _ in a.update = .result(.success(10)) }
-            Input(b) { _ in b.update = .result(.success(20)) }
+            Input(a)
+            Input(b)
         } transform: { $0 + $1 }
         let middle = Composition {
             Input(inner)
@@ -187,7 +192,7 @@ private final class Consumer<Source: AsyncSequence, Value: Sendable> where Sourc
 
     @ViewDataSource(
         make: { (model: Self) in model.source },
-        refresh: { model in await model.refresh() },
+        refresh: { model, _ in await model.refresh() },
         receive: { model, update, sink in
             switch update {
             case .result(let result): sink.receive(result)
@@ -215,3 +220,112 @@ private actor RelationshipService {
 }
 
 private nonisolated struct NamedEntry: Identifiable, Sendable { let id: Int; let name: String }
+
+/// Defines the query's entry lookup and invalidation at the repository boundary.
+@MainActor @Observable
+private final class EntryQuery: LoadableUpdateSource {
+    var latest: Update<NamedEntry> = .reset
+    private var generation: UInt = 0
+    private let names: IdentifiedBucket<NamedEntry>
+
+    init(names: IdentifiedBucket<NamedEntry>) { self.names = names }
+
+    func load(using policy: LoadPolicy) async {
+        generation &+= 1
+        let request = generation
+        do {
+            let entry = try await names.load(id: 1, using: policy)
+            guard generation == request, !Task.isCancelled else { return }
+            latest = .result(.success(entry))
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == request, !Task.isCancelled else { return }
+            latest = .result(.failure(error))
+        }
+    }
+
+    func reset() async throws {
+        generation &+= 1
+        latest = .reset
+        try await names.reset()
+    }
+}
+
+extension IntegrationTests {
+    @MainActor @Test func partitionRetryKeepsViewDataLoading() async throws {
+        let remote = RetryRemote()
+        let buckets = PartitionedBucket(Key<Int>("ensemble.partition.retry"), partitionedBy: String.self) { _ in
+            RemoteSource { try await remote.load() }
+        }
+        let partition = buckets["selected"]
+        let composition = Composition { Input(partition) } transform: { $0 }
+
+        await composition.load(using: .remote)
+        let model = Consumer(composition) { await composition.load(using: .remote) }
+        let data = model.data
+        var received = model.updates.makeAsyncIterator()
+        data.connect()
+        guard case .result(.failure)? = await received.next() else {
+            Issue.record("Expected the initial partition failure")
+            return
+        }
+        #expect(data.phase.kind == .failure)
+
+        let reload = Task { await data.reload() }
+        await remote.waitForRetry()
+        #expect(partition.isLoading)
+        #expect(data.phase.kind == .loading)
+
+        await remote.completeRetry()
+        await reload.value
+        guard case .result(.success(9))? = await received.next() else {
+            Issue.record("Expected success without a reset or repeated failure during the retry")
+            return
+        }
+        #expect(data.phase.kind == .success)
+        #expect(composition.error == nil)
+
+        try await partition.reset()
+        var update: Update<Int>?
+        repeat { update = await received.next() } while isSuccess(update)
+        guard case .reset? = update else {
+            Issue.record("Expected a reset after clearing the partition")
+            return
+        }
+        #expect(data.phase.kind == .empty)
+    }
+
+    private func isSuccess(_ update: Update<Int>?) -> Bool {
+        if case .result(.success)? = update { return true }
+        return false
+    }
+}
+
+private actor RetryRemote {
+    private var firstLoad = true
+    private var retry: CheckedContinuation<Int, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func load() async throws -> Int {
+        if firstLoad {
+            firstLoad = false
+            throw Failure.test
+        }
+        return await withCheckedContinuation { continuation in
+            retry = continuation
+            started?.resume()
+            started = nil
+        }
+    }
+
+    func waitForRetry() async {
+        if retry != nil { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func completeRetry() {
+        retry?.resume(returning: 9)
+        retry = nil
+    }
+}
