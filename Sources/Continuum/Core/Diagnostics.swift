@@ -85,6 +85,22 @@ nonisolated enum BucketMutationKind: String, Sendable {
     case resetLocal = "reset-local"
 }
 
+private nonisolated extension SnapshotFreshness {
+    var rendered: String {
+        switch self {
+        case .unlimited:
+            return "freshness=unlimited"
+        case .localOnly(let staleAfter):
+            return "freshness=ignored-no-remote stale-after=\(continuumSeconds(staleAfter))"
+        case .unvalidated(let staleAfter):
+            return "freshness=unvalidated stale-after=\(continuumSeconds(staleAfter))"
+        case .validated(let age, let staleAfter):
+            let status = requiresRemoteValidation ? "stale" : "fresh"
+            return "freshness=\(status) age=\(continuumSeconds(age)) stale-after=\(continuumSeconds(staleAfter))"
+        }
+    }
+}
+
 nonisolated enum ContinuumLogEvent {
     case bucketConfigured(
         BucketLogIdentity,
@@ -92,7 +108,8 @@ nonisolated enum ContinuumLogEvent {
         writableSources: Int,
         hasRemote: Bool,
         paginated: Bool,
-        invalidationSignals: Int
+        invalidationSignals: Int,
+        staleAfter: Duration?
     )
     case loadRequested(
         BucketLogIdentity,
@@ -104,7 +121,8 @@ nonisolated enum ContinuumLogEvent {
         policy: LoadPolicy,
         established: Bool
     )
-    case loadReturnedMemory(BucketLogIdentity, count: Int)
+    case loadReturnedMemory(BucketLogIdentity, count: Int, freshness: SnapshotFreshness)
+    case loadRequiresValidation(BucketLogIdentity, freshness: SnapshotFreshness)
     case loadJoined(BucketLogIdentity, activeOperationID: String)
     case localSourceStarted(BucketLogIdentity, index: Int, total: Int)
     case localSourceMissed(BucketLogIdentity, index: Int)
@@ -177,6 +195,7 @@ nonisolated enum ContinuumLogEvent {
         case .loadRequested,
              .loadRequestedWithoutSources,
              .loadReturnedMemory,
+             .loadRequiresValidation,
              .loadJoined,
              .localSourceHit,
              .cachedSnapshotPublished,
@@ -204,6 +223,7 @@ nonisolated enum ContinuumLogEvent {
         case .loadRequested,
              .loadRequestedWithoutSources,
              .loadReturnedMemory,
+             .loadRequiresValidation,
              .loadJoined,
              .localSourceStarted,
              .localSourceMissed,
@@ -265,7 +285,7 @@ nonisolated enum ContinuumLogEvent {
         case .localSourceMissed,
              .paginationExhausted:
             "⊘"
-        case .operationSuperseded:
+        case .operationSuperseded, .loadRequiresValidation:
             "↻"
         case .operationCancelled:
             "•"
@@ -290,12 +310,14 @@ nonisolated enum ContinuumLogEvent {
             let writableSources,
             let hasRemote,
             let paginated,
-            let invalidationSignals
+            let invalidationSignals,
+            let staleAfter
         ):
             """
             configured \(bucket.rendered) local=\(localSources) \
             writable=\(writableSources) remote=\(hasRemote) \
-            paginated=\(paginated) invalidations=\(invalidationSignals)
+            paginated=\(paginated) invalidations=\(invalidationSignals) \
+            stale-after=\(staleAfter.map(continuumSeconds) ?? "unlimited")
             """
         case .loadRequested(let bucket, let policy, let established):
             """
@@ -311,8 +333,10 @@ nonisolated enum ContinuumLogEvent {
             requested load for source-less bucket \(bucket.rendered) \
             policy=\(policy.debugName) established=\(established)
             """
-        case .loadReturnedMemory(let bucket, let count):
-            "returned established memory \(bucket.rendered) count=\(count)"
+        case .loadReturnedMemory(let bucket, let count, let freshness):
+            "returned established memory \(bucket.rendered) count=\(count) \(freshness.rendered)"
+        case .loadRequiresValidation(let bucket, let freshness):
+            "requires remote validation \(bucket.rendered) \(freshness.rendered)"
         case .loadJoined(let bucket, let activeOperationID):
             """
             joined active load \(bucket.rendered) \
@@ -533,6 +557,11 @@ private nonisolated func continuumEscaped(_ value: String) -> String {
 
 private nonisolated func continuumShortIdentifier(_ identifier: String) -> String {
     String(identifier.prefix(8)).uppercased()
+}
+
+private nonisolated func continuumSeconds(_ duration: Duration) -> String {
+    let (seconds, attoseconds) = duration.components
+    return "\(Double(seconds) + Double(attoseconds) / 1e18)s"
 }
 
 private nonisolated func continuumErrorName(_ error: any Error) -> String {

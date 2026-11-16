@@ -258,8 +258,8 @@ public final class Bucket<Space: ContinuumKeySpace, Operation: Sendable>: Sendab
                 }.count,
                 hasRemote: remoteSource != nil,
                 paginated: remoteSource?.isPaginated == true,
-                invalidationSignals:
-                    configuration.invalidationSignals.count
+                invalidationSignals: configuration.invalidationSignals.count,
+                staleAfter: staleAfter
             )
         )
 
@@ -859,17 +859,20 @@ private extension Bucket {
     }
 
     func loadCached() async throws -> Space.Snapshot {
-        if isLoaded == false || requiresRemoteValidation {
+        if isLoaded == false || snapshotFreshness.requiresRemoteValidation {
             try await waitForMutations()
         }
-        if requiresRemoteValidation {
+        let freshness = snapshotFreshness
+        if freshness.requiresRemoteValidation {
+            continuumDebug(.loadRequiresValidation(logIdentity, freshness: freshness))
             return try await loadCachedThenRemote()
         }
         if isLoaded, let snapshot {
             continuumDebug(
                 .loadReturnedMemory(
                     logIdentity,
-                    count: snapshotCount(snapshot)
+                    count: snapshotCount(snapshot),
+                    freshness: freshness
                 )
             )
             return snapshot
@@ -889,10 +892,11 @@ private extension Bucket {
         return try await resolve(flight).snapshot
     }
 
-    private var requiresRemoteValidation: Bool {
-        guard let staleAfter, remoteSource != nil else { return false }
-        guard let lastRemoteLoad else { return true }
-        return lastRemoteLoad.duration(to: now()) >= staleAfter
+    private var snapshotFreshness: SnapshotFreshness {
+        guard let staleAfter else { return .unlimited }
+        guard remoteSource != nil else { return .localOnly(staleAfter: staleAfter) }
+        guard let lastRemoteLoad else { return .unvalidated(staleAfter: staleAfter) }
+        return .validated(age: lastRemoteLoad.duration(to: now()), staleAfter: staleAfter)
     }
 
     func loadCachedThenRemote() async throws -> Space.Snapshot {

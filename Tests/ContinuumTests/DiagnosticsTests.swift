@@ -28,7 +28,8 @@ struct DiagnosticsTests {
                 policy: .cached,
                 established: false
             ),
-            .loadReturnedMemory(identity, count: 2),
+            .loadReturnedMemory(identity, count: 2, freshness: .unlimited),
+            .loadRequiresValidation(identity, freshness: .unvalidated(staleAfter: .seconds(10))),
             .loadJoined(identity, activeOperationID: "AAAA1111"),
             .localSourceHit(identity, index: 1, count: 2),
             .cachedSnapshotPublished(identity, count: 2),
@@ -78,7 +79,8 @@ struct DiagnosticsTests {
                 writableSources: 1,
                 hasRemote: true,
                 paginated: true,
-                invalidationSignals: 1
+                invalidationSignals: 1,
+                staleAfter: nil
             ),
             .localSourceStarted(identity, index: 1, total: 2),
             .localSourceMissed(identity, index: 1),
@@ -150,6 +152,54 @@ struct DiagnosticsTests {
                 [load][op:12AB34CD] ⚠ requested load for source-less bucket \
                 bucket="posts" version=2 instance=FACE1234 policy=remote established=false
                 """
+        )
+    }
+
+    @Test("Bucket setup logs the configured freshness interval")
+    func freshnessConfigurationRendering() {
+        let event = ContinuumLogEvent.bucketConfigured(
+            identity,
+            localSources: 1,
+            writableSources: 1,
+            hasRemote: true,
+            paginated: false,
+            invalidationSignals: 0,
+            staleAfter: .milliseconds(1250)
+        )
+
+        #expect(
+            event.renderedMessage(operationID: nil)
+                == """
+                [lifecycle] • configured bucket="posts" version=2 instance=FACE1234 \
+                local=1 writable=1 remote=true paginated=false invalidations=0 stale-after=1.25s
+                """
+        )
+    }
+
+    @Test("Cached load decisions report freshness, age, and interval")
+    func freshnessDecisionRendering() {
+        let memory = "[load][op:12AB34CD] ✓ returned established memory bucket=\"posts\" version=2 instance=FACE1234 count=2"
+        let validation = "[load][op:12AB34CD] ↻ requires remote validation bucket=\"posts\" version=2 instance=FACE1234"
+
+        #expect(
+            ContinuumLogEvent.loadReturnedMemory(identity, count: 2, freshness: .unlimited)
+                .renderedMessage(operationID: "12AB34CD") == "\(memory) freshness=unlimited"
+        )
+        #expect(
+            ContinuumLogEvent.loadReturnedMemory(identity, count: 2, freshness: .localOnly(staleAfter: .zero))
+                .renderedMessage(operationID: "12AB34CD") == "\(memory) freshness=ignored-no-remote stale-after=0.0s"
+        )
+        #expect(
+            ContinuumLogEvent.loadReturnedMemory(identity, count: 2, freshness: .validated(age: .seconds(9), staleAfter: .seconds(10)))
+                .renderedMessage(operationID: "12AB34CD") == "\(memory) freshness=fresh age=9.0s stale-after=10.0s"
+        )
+        #expect(
+            ContinuumLogEvent.loadRequiresValidation(identity, freshness: .unvalidated(staleAfter: .seconds(10)))
+                .renderedMessage(operationID: "12AB34CD") == "\(validation) freshness=unvalidated stale-after=10.0s"
+        )
+        #expect(
+            ContinuumLogEvent.loadRequiresValidation(identity, freshness: .validated(age: .seconds(10), staleAfter: .seconds(10)))
+                .renderedMessage(operationID: "12AB34CD") == "\(validation) freshness=stale age=10.0s stale-after=10.0s"
         )
     }
 

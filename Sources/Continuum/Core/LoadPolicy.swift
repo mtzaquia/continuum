@@ -58,3 +58,18 @@ internal extension LoadPolicy {
     /// Shared replacement decision for snapshot and entry loading.
     var replacesActiveLoad: Bool { self == .remote }
 }
+
+nonisolated enum SnapshotFreshness {
+    case unlimited
+    case localOnly(staleAfter: Duration)
+    case unvalidated(staleAfter: Duration)
+    case validated(age: Duration, staleAfter: Duration)
+
+    var requiresRemoteValidation: Bool {
+        switch self {
+        case .unlimited, .localOnly: false
+        case .unvalidated: true
+        case .validated(let age, let staleAfter): age >= staleAfter
+        }
+    }
+}
