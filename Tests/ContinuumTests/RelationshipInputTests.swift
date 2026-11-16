@@ -112,13 +112,12 @@ struct RelationshipInputTests {
         let authors = makeAuthors(lookups)
         try await authors.load()
         let posts = Bucket(Key<[Post]>("resolved.pages")) {
-            RemoteSource(
-                { Page(values: [Post(authorID: 1)], next: 1) },
-                nextPage: NextPage { (_: Int) in
-                    await pages.record()
-                    return Page(values: [Post(authorID: 2), Post(authorID: 3)], next: nil)
-                }
-            )
+            RemoteSource {
+                Page(values: [Post(authorID: 1)], next: 1)
+            } nextPage: { (_: Int) in
+                await pages.record()
+                return Page(values: [Post(authorID: 2), Post(authorID: 3)], next: nil)
+            }
         }
         let screen = Composition {
             Input(posts).resolving(\.authorID, from: authors)
@@ -155,10 +154,9 @@ struct RelationshipInputTests {
     func pageArrivesDuringLoad() async throws {
         let lookups = EntryLookups()
         let posts = Bucket(Key<[Post]>("resolved.overlap")) {
-            RemoteSource(
-                { Page(values: [Post(authorID: 2)], next: 1) },
-                nextPage: NextPage { (_: Int) in Page(values: [Post(authorID: 3)], next: nil) }
-            )
+            RemoteSource {
+                Page(values: [Post(authorID: 2)], next: 1)
+            } nextPage: { (_: Int) in Page(values: [Post(authorID: 3)], next: nil) }
         }
         let authors = makeAuthors(lookups)
         let screen = Composition {
@@ -235,7 +233,9 @@ struct RelationshipInputTests {
     private func makeAuthors(_ lookups: EntryLookups) -> IdentifiedBucket<Author> {
         Bucket(IndexedKey("resolved.authors")) {
             LocalSource { [Author(id: 1, name: "Local")] }
-            RemoteSource({ [Author]() }, loadEntry: { try await lookups.load($0) })
+            RemoteSource {
+                [Author]()
+            } loadEntry: { try await lookups.load($0) }
         }
     }
 }

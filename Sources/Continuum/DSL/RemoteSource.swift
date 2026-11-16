@@ -40,8 +40,7 @@ nonisolated struct RemotePageContinuation<
 /// A bucket accepts at most one remote source. Cached loads reach it after all
 /// local sources miss, or when configured snapshot freshness requires remote
 /// validation. Cached-then-remote loads require and always reach it,
-/// while remote loads use it directly and supersede active source work. An
-/// advanced source can declare a continuation and an entry loader.
+/// while remote loads use it directly and supersede active source work.
 /// Successful remote snapshots write through to every writable ``LocalSource``
 /// before entering observable memory.
 nonisolated public struct RemoteSource<
@@ -65,43 +64,81 @@ nonisolated public struct RemoteSource<
         self.loadEntry = loadEntry
     }
 
-    /// Loads an initial page and defines how to fetch and merge subsequent pages.
+    /// Loads an initial array page and appends subsequent pages.
+    ///
+    /// Indexed buckets retain the first position of each index and use the
+    /// latest value when subsequent pages include duplicates.
     ///
     /// - Parameters:
     ///   - firstPage: The operation that returns the initial page.
-    ///   - nextPage: The continuation operation and merge behavior.
     ///   - loadEntry: An optional lookup for individual indexed entries.
-    public init<Cursor: Sendable>(
+    ///   - nextPage: The operation that fetches a page using the preceding cursor.
+    public init<Element: Sendable, Cursor: Sendable>(
         _ firstPage: @escaping @Sendable () async throws -> Page<Space.Snapshot, Cursor>,
-        nextPage: NextPage<Space.Snapshot, Cursor>,
-        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)? = nil
+        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)? = nil,
+        nextPage: @escaping @Sendable (Cursor) async throws -> Page<Space.Snapshot, Cursor>
+    ) where Space.Snapshot == [Element] {
+        self.init(firstPage: firstPage, loadEntry: loadEntry, nextPage: nextPage, merge: { $0 + $1 })
+    }
+
+    /// Loads pages and accumulates one nested collection within the snapshot.
+    ///
+    /// Each incoming page supplies the fields outside the collection. Within
+    /// the collection, each index keeps its first position and latest value.
+    ///
+    /// - Parameters:
+    ///   - collection: The writable path of the collection that accumulates across pages.
+    ///   - index: The stable index of each accumulated entry.
+    ///   - firstPage: The operation that returns the initial page.
+    ///   - loadEntry: An optional lookup for individual indexed entries.
+    ///   - nextPage: The operation that fetches a page using the preceding cursor.
+    public init<Element: Sendable, Index: Hashable & Sendable, Cursor: Sendable>(
+        accumulating collection: WritableKeyPath<Space.Snapshot, [Element]> & Sendable,
+        indexedBy index: KeyPath<Element, Index> & Sendable,
+        _ firstPage: @escaping @Sendable () async throws -> Page<Space.Snapshot, Cursor>,
+        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)? = nil,
+        nextPage: @escaping @Sendable (Cursor) async throws -> Page<Space.Snapshot, Cursor>
+    ) {
+        self.init(firstPage: firstPage, loadEntry: loadEntry, nextPage: nextPage) { current, incoming in
+            var result = incoming
+            result[keyPath: collection] = orderedUniqueValues(
+                current[keyPath: collection] + incoming[keyPath: collection],
+                indexedBy: { $0[keyPath: index] }
+            )
+            return result
+        }
+    }
+
+    private init<Cursor: Sendable>(
+        firstPage: @escaping @Sendable () async throws -> Page<Space.Snapshot, Cursor>,
+        loadEntry: (@Sendable (Space.Input) async throws -> Space.Value)?,
+        nextPage: @escaping @Sendable (Cursor) async throws -> Page<Space.Snapshot, Cursor>,
+        merge: @escaping @Sendable (Space.Snapshot, Space.Snapshot) -> Space.Snapshot
     ) {
         operation = {
             let page = try await firstPage()
-            return remoteSnapshot(from: page, nextPage: nextPage)
+            return remoteSnapshot(from: page, nextPage: nextPage, merge: merge)
         }
         isPaginated = true
         self.loadEntry = loadEntry
     }
 }
 
-nonisolated func remoteSnapshot<
+private nonisolated func remoteSnapshot<
     Space: ContinuumKeySpace,
     Cursor: Sendable
 >(
     from page: Page<Space.Snapshot, Cursor>,
-    nextPage: NextPage<Space.Snapshot, Cursor>
+    nextPage: @escaping @Sendable (Cursor) async throws -> Page<Space.Snapshot, Cursor>,
+    merge: @escaping @Sendable (Space.Snapshot, Space.Snapshot) -> Space.Snapshot
 ) -> RemoteSnapshot<Space> {
     let continuation = page.next.map { cursor in
         RemotePageContinuation<Space>(
             operation: {
-                let page = try await nextPage.operation(cursor)
-                return remoteSnapshot(
-                    from: page,
-                    nextPage: nextPage
-                )
+                let page = try await nextPage(cursor)
+                return remoteSnapshot(from: page, nextPage: nextPage, merge: merge)
             },
-            merge: nextPage.merge
+            merge: merge
         )
     }
 

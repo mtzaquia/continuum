@@ -1320,28 +1320,25 @@ struct BucketTests {
             } persist: { snapshot in
                 await writes.record(snapshot)
             }
-            RemoteSource(
-                {
-                    Page(
-                        values: [
-                            Label(id: 1, text: "one"),
-                            Label(id: 2, text: "two"),
-                        ],
-                        next: 2
-                    )
-                },
-                nextPage: NextPage { cursor in
-                    await nextPages.increment()
-                    #expect(cursor == 2)
-                    return Page(
-                        values: [
-                            Label(id: 2, text: "TWO"),
-                            Label(id: 3, text: "three"),
-                        ],
-                        next: Optional<Int>.none
-                    )
-                }
-            )
+            RemoteSource {
+                Page(
+                    values: [
+                        Label(id: 1, text: "one"),
+                        Label(id: 2, text: "two"),
+                    ],
+                    next: 2
+                )
+            } nextPage: { cursor in
+                await nextPages.increment()
+                #expect(cursor == 2)
+                return Page(
+                    values: [
+                        Label(id: 2, text: "TWO"),
+                        Label(id: 3, text: "three"),
+                    ],
+                    next: Optional<Int>.none
+                )
+            }
         }
 
         #expect(labels.hasNextPage == false)
@@ -1376,20 +1373,17 @@ struct BucketTests {
     func paginatedRemoteMutations() async throws {
         let calls = StringRecorder()
         let labels = Bucket(TestData.labels) {
-            RemoteSource(
-                {
-                    Page(
-                        values: [Label(id: 1, text: "one")],
-                        next: 2
-                    )
-                },
-                nextPage: NextPage { _ in
-                    Page(
-                        values: [Label](),
-                        next: Optional<Int>.none
-                    )
-                }
-            )
+            RemoteSource {
+                Page(
+                    values: [Label(id: 1, text: "one")],
+                    next: 2
+                )
+            } nextPage: { _ in
+                Page(
+                    values: [Label](),
+                    next: Optional<Int>.none
+                )
+            }
         }
         _ = try await labels.load()
 
@@ -1416,18 +1410,15 @@ struct BucketTests {
     func paginationCoalescing() async throws {
         let nextPage = SnapshotGate<Page<[Label], Int>>()
         let labels = Bucket(TestData.labels) {
-            RemoteSource(
-                {
-                    Page(
-                        values: [Label(id: 1, text: "one")],
-                        next: 2
-                    )
-                },
-                nextPage: NextPage { cursor in
-                    #expect(cursor == 2)
-                    return await nextPage.load()
-                }
-            )
+            RemoteSource {
+                Page(
+                    values: [Label(id: 1, text: "one")],
+                    next: 2
+                )
+            } nextPage: { cursor in
+                #expect(cursor == 2)
+                return await nextPage.load()
+            }
         }
         _ = try await labels.load()
 
@@ -1462,25 +1453,22 @@ struct BucketTests {
     func paginationFailure() async throws {
         let attempts = Counter()
         let labels = Bucket(TestData.labels) {
-            RemoteSource(
-                {
-                    Page(
-                        values: [Label(id: 1, text: "one")],
-                        next: "cursor"
-                    )
-                },
-                nextPage: NextPage { cursor in
-                    #expect(cursor == "cursor")
-                    await attempts.increment()
-                    if await attempts.value == 1 {
-                        throw TestError.failed
-                    }
-                    return Page(
-                        values: [Label(id: 2, text: "two")],
-                        next: Optional<String>.none
-                    )
+            RemoteSource {
+                Page(
+                    values: [Label(id: 1, text: "one")],
+                    next: "cursor"
+                )
+            } nextPage: { cursor in
+                #expect(cursor == "cursor")
+                await attempts.increment()
+                if await attempts.value == 1 {
+                    throw TestError.failed
                 }
-            )
+                return Page(
+                    values: [Label(id: 2, text: "two")],
+                    next: Optional<String>.none
+                )
+            }
         }
         _ = try await labels.load()
 
@@ -1514,14 +1502,11 @@ struct BucketTests {
                     throw TestError.failed
                 }
             }
-            RemoteSource(
-                {
-                    Page(values: [existing], next: "cursor")
-                },
-                nextPage: NextPage { (_: String) in
-                    Page(values: [Label](), next: nil)
-                }
-            )
+            RemoteSource {
+                Page(values: [existing], next: "cursor")
+            } nextPage: { (_: String) in
+                Page(values: [Label](), next: nil)
+            }
         }
         _ = try await labels.load()
 
@@ -1544,24 +1529,21 @@ struct BucketTests {
         let firstPages = Counter()
         let nextPage = SnapshotGate<Page<[Label], Int>>()
         let labels = Bucket(TestData.labels) {
-            RemoteSource(
-                {
-                    await firstPages.increment()
-                    if await firstPages.value == 1 {
-                        return Page(
-                            values: [Label(id: 1, text: "first")],
-                            next: 2
-                        )
-                    }
+            RemoteSource {
+                await firstPages.increment()
+                if await firstPages.value == 1 {
                     return Page(
-                        values: [Label(id: 9, text: "refreshed")],
-                        next: nil
+                        values: [Label(id: 1, text: "first")],
+                        next: 2
                     )
-                },
-                nextPage: NextPage { _ in
-                    await nextPage.load()
                 }
-            )
+                return Page(
+                    values: [Label(id: 9, text: "refreshed")],
+                    next: nil
+                )
+            } nextPage: { _ in
+                await nextPage.load()
+            }
         }
         _ = try await labels.load()
 
@@ -1596,31 +1578,28 @@ struct BucketTests {
             TestData.labels,
             partitionedBy: Purpose.self
         ) { purpose in
-            RemoteSource(
-                {
-                    Page(
-                        values: [
-                            Label(
-                                id: purpose == .buy ? 1 : 10,
-                                text: "first"
-                            ),
-                        ],
-                        next: 2
-                    )
-                },
-                nextPage: NextPage { _ in
-                    await pages.increment(purpose)
-                    return Page(
-                        values: [
-                            Label(
-                                id: purpose == .buy ? 2 : 20,
-                                text: "next"
-                            ),
-                        ],
-                        next: Optional<Int>.none
-                    )
-                }
-            )
+            RemoteSource {
+                Page(
+                    values: [
+                        Label(
+                            id: purpose == .buy ? 1 : 10,
+                            text: "first"
+                        ),
+                    ],
+                    next: 2
+                )
+            } nextPage: { _ in
+                await pages.increment(purpose)
+                return Page(
+                    values: [
+                        Label(
+                            id: purpose == .buy ? 2 : 20,
+                            text: "next"
+                        ),
+                    ],
+                    next: Optional<Int>.none
+                )
+            }
         }
 
         _ = try await labels[.buy].load()
@@ -1641,20 +1620,17 @@ struct BucketTests {
             RemoteSource { [Label(id: 1, text: "one")] }
         }
         let paginated = Bucket(TestData.labels) {
-            RemoteSource(
-                {
-                    Page(
-                        values: [Label(id: 1, text: "one")],
-                        next: 2
-                    )
-                },
-                nextPage: NextPage { _ in
-                    Page(
-                        values: [Label](),
-                        next: Optional<Int>.none
-                    )
-                }
-            )
+            RemoteSource {
+                Page(
+                    values: [Label(id: 1, text: "one")],
+                    next: 2
+                )
+            } nextPage: { _ in
+                Page(
+                    values: [Label](),
+                    next: Optional<Int>.none
+                )
+            }
         }
 
         await #expect(throws: ContinuumError.self) {
@@ -1673,36 +1649,30 @@ struct BucketTests {
     @Test("A nested page refreshes siblings and accumulates only its collection")
     func nestedPagination() async throws {
         let subscription = Bucket(TestData.subscription) {
-            RemoteSource(
-                {
-                    Page(
-                        value: Subscription(
-                            plan: "starter",
-                            runs: [
-                                Run(id: 1, status: "finished"),
-                                Run(id: 2, status: "running"),
-                            ]
-                        ),
-                        next: 2
-                    )
-                },
-                nextPage: NextPage(
-                    accumulating: \.runs,
-                    indexedBy: \.id
-                ) { cursor in
-                    #expect(cursor == 2)
-                    return Page(
-                        value: Subscription(
-                            plan: "pro",
-                            runs: [
-                                Run(id: 2, status: "finished"),
-                                Run(id: 3, status: "running"),
-                            ]
-                        ),
-                        next: Optional<Int>.none
-                    )
-                }
-            )
+            RemoteSource(accumulating: \.runs, indexedBy: \.id) {
+                Page(
+                    value: Subscription(
+                        plan: "starter",
+                        runs: [
+                            Run(id: 1, status: "finished"),
+                            Run(id: 2, status: "running"),
+                        ]
+                    ),
+                    next: 2
+                )
+            } nextPage: { cursor in
+                #expect(cursor == 2)
+                return Page(
+                    value: Subscription(
+                        plan: "pro",
+                        runs: [
+                            Run(id: 2, status: "finished"),
+                            Run(id: 3, status: "running"),
+                        ]
+                    ),
+                    next: Optional<Int>.none
+                )
+            }
         }
 
         let first = try await subscription.load()

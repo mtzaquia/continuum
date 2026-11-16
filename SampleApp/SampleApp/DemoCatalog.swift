@@ -74,16 +74,13 @@ final class DemoCatalog {
             } persist: { snapshot in
                 await cache.persist(snapshot)
             }
-            RemoteSource(
-                {
-                    let page = try await remote.products(after: nil)
-                    return Page(values: page.values, next: page.next)
-                },
-                nextPage: NextPage { cursor in
-                    let page = try await remote.products(after: cursor)
-                    return Page(values: page.values, next: page.next)
-                }
-            )
+            RemoteSource {
+                let page = try await remote.products(after: nil)
+                return Page(values: page.values, next: page.next)
+            } nextPage: { cursor in
+                let page = try await remote.products(after: cursor)
+                return Page(values: page.values, next: page.next)
+            }
             Mutate { (operation: CatalogMutation, mutation) in
                 switch operation {
                 case .store(let product):

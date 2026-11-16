@@ -123,7 +123,7 @@ public final class Composition<Output: Sendable>: AsyncSequence {
         recompute()
     }
 
-    /// Loads participating Continuum sources and processes pending input observations.
+    /// Loads participating sources and processes pending input observations.
     ///
     /// Each source loads once per call, including across nested compositions.
     /// Independent sources load concurrently. Observe failures through

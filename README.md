@@ -4,17 +4,17 @@ Continuum is a Swift library for loading, observing, and combining typed snapsho
 
 - A **bucket** owns one snapshot and its load, mutation, and reset operations. An indexed bucket can also load individual entries.
 - A **partitioned bucket** creates independent buckets by key, such as one list per account.
-- A **composition** derives one result from observable inputs and coordinates loads across Continuum sources. Apps and other libraries can supply their own inputs through the public `UpdateSource` protocol.
+- A **composition** derives one result from observable inputs and coordinates their loads. Apps and other libraries can supply their own inputs through `UpdateSource` and opt into loading with `load(using:)`.
 
 ## Install
 
 Continuum 2.0 requires Swift 6.3 and supports iOS 17+ and macOS 14+. Pin the prerelease in Swift Package Manager and link the `Continuum` product to your target.
 
 ```swift
-.package(url: "https://github.com/mtzaquia/continuum.git", exact: "2.0.0-beta.10")
+.package(url: "https://github.com/mtzaquia/continuum.git", exact: "2.0.0-beta.11")
 ```
 
-In Xcode, add the same repository URL and choose **Exact Version** with `2.0.0-beta.10`. See the [prerelease notes](https://github.com/mtzaquia/continuum/releases/tag/v2.0.0-beta.10), [1.1 documentation](https://github.com/mtzaquia/continuum/tree/v1.1.0), or [migration guide](docs/migrating-to-2.md).
+In Xcode, add the same repository URL and choose **Exact Version** with `2.0.0-beta.11`. See the [prerelease notes](https://github.com/mtzaquia/continuum/releases/tag/v2.0.0-beta.11), [1.1 documentation](https://github.com/mtzaquia/continuum/tree/v1.1.0), or [migration guide](docs/migrating-to-2.md).
 
 ## Five-minute start
 

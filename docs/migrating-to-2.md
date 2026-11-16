@@ -18,7 +18,7 @@ Use `MutationAction<Space>` as the operation type for a closure-based bucket. Th
 
 ## Update remote loading and mutation configuration
 
-- Keep `RemoteSource { … }` for a snapshot. Replace the nested builder and `Load` wrappers with `RemoteSource({ … }, nextPage: NextPage { … }, loadEntry: { id in … })`, supplying the capabilities you use. Earlier `LoadEntry` declarations become `loadEntry:`. [Loading](loading.md) · [Pagination](pagination.md)
+- Keep `RemoteSource { … }` for a snapshot. Give `RemoteSource` the snapshot or first-page loader first, followed by the labeled trailing closures `loadEntry:` and `nextPage:` as needed. Move nested pagination's `accumulating:` and `indexedBy:` arguments onto `RemoteSource`. [Loading](loading.md) · [Pagination](pagination.md)
 - Replace `Store`, `Remove`, `store(_:)`, and `remove` with `Mutate` and `mutate(_:)`. Establish the initial snapshot with `load()`. Edit it with `mutation.update` or `mutation.update(id:)`. The `remote:` closure returns `.acknowledged` to keep the edit or `.updated(value)` to apply the server value. This also replaces prerelease `remotely:` and `mutation.replace(with:)`. [Mutations](remote-mutations.md)
 
 ## Update observation and reset
@@ -35,5 +35,5 @@ A failed refresh keeps a usable snapshot as `.result(.success(snapshot))`. Use `
 ## Update composition inputs
 
 - Pass buckets and nested compositions to `Input(source)`. Remove closures that only forwarded the load policy. Use `Input(source, loads: false)` in place of a no-op load closure.
-- Replace `Input(update:load:)`, `Input(updates:)`, `InputSubscriptionBehavior`, and custom per-input load closures with an observable `UpdateSource`. The external source owns its requests, subscriptions, and reset. Call its methods directly. [External source example](composition.md#observe-an-external-source)
+- Replace `Input(update:load:)`, `Input(updates:)`, `InputSubscriptionBehavior`, and custom per-input load closures with an observable `UpdateSource`. Implement `load(using:)` to receive composition load requests. The external source owns its requests, subscriptions, and reset. [External source example](composition.md#observe-an-external-source)
 - Declare the relationship with `Input(posts).resolving(\.authorID, from: authors)`. The transform receives one `ResolvedSnapshot` with `root` and `related`. Configure former one-shot lookups as `loadEntry:` on the related bucket. Retry from the composition and call `loadNext()` on the root bucket. [Resolve related entries](composition.md#resolve-related-entries)

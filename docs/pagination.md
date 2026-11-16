@@ -1,19 +1,16 @@
 # Paginate a bucket
 
-Configure the first request and its continuation in `RemoteSource`. Call `loadNext()` on the bucket that owns the cursor.
+Give `RemoteSource` a first-page closure and a `nextPage:` closure for the cursor. When individual entries can load on demand, add `loadEntry:` between the two. Call `loadNext()` on the bucket that owns the cursor.
 
 ```swift
 let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
-  RemoteSource(
-    {
-      let page = try await client.posts(after: nil)
-      return Page(values: page.posts, next: page.nextCursor)
-    },
-    nextPage: NextPage { cursor in
-      let page = try await client.posts(after: cursor)
-      return Page(values: page.posts, next: page.nextCursor)
-    }
-  )
+  RemoteSource {
+    let page = try await client.posts(after: nil)
+    return Page(values: page.posts, next: page.nextCursor)
+  } nextPage: { cursor in
+    let page = try await client.posts(after: cursor)
+    return Page(values: page.posts, next: page.nextCursor)
+  }
 }
 
 try await posts.load(using: .remote)
@@ -32,16 +29,13 @@ For a snapshot that holds a collection, return `Page(value:next:)` and specify t
 
 ```swift
 let workflow = Bucket(Key<Workflow>("workflow")) {
-  RemoteSource(
-    {
-      let page = try await client.workflow(after: nil)
-      return Page(value: page.workflow, next: page.nextCursor)
-    },
-    nextPage: NextPage(accumulating: \.runs, indexedBy: \.id) { cursor in
-      let page = try await client.workflow(after: cursor)
-      return Page(value: page.workflow, next: page.nextCursor)
-    }
-  )
+  RemoteSource(accumulating: \.runs, indexedBy: \.id) {
+    let page = try await client.workflow(after: nil)
+    return Page(value: page.workflow, next: page.nextCursor)
+  } nextPage: { cursor in
+    let page = try await client.workflow(after: cursor)
+    return Page(value: page.workflow, next: page.nextCursor)
+  }
 }
 ```
 

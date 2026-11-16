@@ -541,7 +541,7 @@ public extension Bucket {
     /// work waits for pending mutations and resets before capturing its base
     /// snapshot; a later mutation supersedes an active page.
     /// Array pages append using the key's ordered-index semantics. A
-    /// ``NextPage`` with nested accumulation uses the incoming snapshot as its
+    /// A remote source with nested accumulation uses the incoming snapshot as its
     /// base and accumulates only the selected collection. When the latest page
     /// has no next cursor, this method returns the current snapshot without
     /// starting source work.
@@ -554,7 +554,7 @@ public extension Bucket {
     ///   the remote source is not paginated,
     ///   ``ContinuumError/initialPageNotLoaded(namespace:)`` before an initial
     ///   remote page, or an error raised while loading or persisting
-    ///   ``NextPage``.
+    ///   the next page.
     @discardableResult
     func loadNext() async throws -> Space.Snapshot {
         try await ContinuumLogContext.withOperation {

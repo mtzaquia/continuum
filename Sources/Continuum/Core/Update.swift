@@ -39,12 +39,11 @@ extension Update {
     }
 }
 
-/// The public observation contract for inputs to a composition.
+/// The public observation and loading contract for inputs to a composition.
 ///
-/// Continuum's buckets and compositions conform to this
-/// protocol. Apps and other libraries can conform their own observable classes
-/// and pass them to ``Input``. The source owns its loading, reset, and subscription
-/// lifecycle.
+/// Buckets and compositions conform to this protocol. Apps and libraries can
+/// pass their own observable sources to ``Input``. Each source owns its loading,
+/// reset, and subscription lifecycle.
 @MainActor
 public protocol UpdateSource<Snapshot>: AnyObject, Observable {
     /// The value published when the source succeeds.
@@ -57,10 +56,23 @@ public protocol UpdateSource<Snapshot>: AnyObject, Observable {
     /// The default is `nil`. Publish a failure that prevents an available
     /// snapshot through ``latest``.
     var error: (any Error)? { get }
+
+    /// Loads or refreshes the source using the requested policy.
+    ///
+    /// The default for external sources is a no-op. Implement this method to
+    /// participate in composition loads. Publish failures through ``latest``
+    /// or ``error``.
+    func load(using policy: LoadPolicy) async
 }
 
 public extension UpdateSource {
     var error: (any Error)? { nil }
+
+    func load(using policy: LoadPolicy) async {
+        if let source = self as? any LoadableSource {
+            await SourceLoadContext.load(source, using: policy)
+        }
+    }
 }
 
 // Keeps invalidation visible when Observation coalesces a reset and its replacement.
@@ -72,7 +84,12 @@ protocol CompositionResetSource: AnyObject {
 /// A participant in a composition load.
 @MainActor
 protocol LoadableSource: AnyObject, Sendable {
+    var loadIdentity: ObjectIdentifier { get }
     func load(in context: SourceLoadContext) async
+}
+
+extension LoadableSource {
+    var loadIdentity: ObjectIdentifier { ObjectIdentifier(self) }
 }
 
 /// Shares dependent loads for the duration of a single top-level load.
@@ -109,7 +126,7 @@ final class SourceLoadContext: Sendable {
     @MainActor
     func load(_ source: any LoadableSource) async {
         guard !Task.isCancelled else { return }
-        let id = ObjectIdentifier(source)
+        let id = source.loadIdentity
         let task = state.withLock { state -> Task<Void, Never>? in
             guard !state.isCancelled else { return nil }
             if let task = state.loads[id] { return task }

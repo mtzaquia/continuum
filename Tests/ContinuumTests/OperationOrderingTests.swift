@@ -157,13 +157,12 @@ struct OperationOrderingTests {
         let gate = OperationGate<Int>()
         let pageEntered = OperationGate<Void>()
         let bucket = Bucket(IndexedKey<Int, Int>("ordering.store-page", indexedBy: { $0 })) {
-            RemoteSource(
-                { Page(values: [1], next: 1) },
-                nextPage: NextPage { (_: Int) in
-                    await pageEntered.finish(())
-                    return Page(values: [3], next: Optional<Int>.none)
-                }
-            )
+            RemoteSource {
+                Page(values: [1], next: 1)
+            } nextPage: { (_: Int) in
+                await pageEntered.finish(())
+                return Page(values: [3], next: Optional<Int>.none)
+            }
         }
         try await bucket.load()
         let mutation = Task {
@@ -224,10 +223,9 @@ struct OperationOrderingTests {
         let disk = PageDisk()
         let bucket = Bucket(IndexedKey<Int, Int>("ordering.cancel-reset", indexedBy: { $0 })) {
             LocalSource { nil } persist: { await disk.write($0) }
-            RemoteSource(
-                { Page(values: [1], next: 1) },
-                nextPage: NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
-            )
+            RemoteSource {
+                Page(values: [1], next: 1)
+            } nextPage: { (_: Int) in Page(values: [2], next: Optional<Int>.none) }
         }
         try await bucket.load()
         let reset = Task { try await bucket.reset() }

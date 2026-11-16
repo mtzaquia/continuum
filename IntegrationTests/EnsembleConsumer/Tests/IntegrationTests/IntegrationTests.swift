@@ -97,10 +97,9 @@ struct IntegrationTests {
     @MainActor @Test func relationshipResetFailureAndRetry() async throws {
         let service = RelationshipService()
         let names = Bucket(IndexedKey<Int, NamedEntry>("ensemble.names")) {
-            RemoteSource(
-                { [NamedEntry]() },
-                loadEntry: { id in NamedEntry(id: id, name: try await service.name(id)) }
-            )
+            RemoteSource {
+                [NamedEntry]()
+            } loadEntry: { id in NamedEntry(id: id, name: try await service.name(id)) }
         }
         let posts = Bucket(Key<[Int]>("ensemble.posts")) { LocalSource { [1] } }
         let child = Composition {

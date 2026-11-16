@@ -28,9 +28,8 @@ public struct Input<Value: Sendable> {
 
     /// Observes a Continuum or external ``UpdateSource``.
     ///
-    /// By default, composition loads also load buckets and nested
-    /// compositions. Set `loads` to `false` to skip loading through this
-    /// input. Call an external source's operations directly.
+    /// Composition loads forward their policy to the source by default.
+    /// Set `loads` to `false` to observe it without forwarding loads.
     public init(_ source: any UpdateSource<Value>, loads: Bool = true) {
         let resetSource = source as? any CompositionResetSource
         read = {
@@ -41,7 +40,7 @@ public struct Input<Value: Sendable> {
                 return source.error.map { [$0] }
             })
         }
-        loadSource = loads ? source as? any LoadableSource : nil
+        loadSource = loads ? (source as? any LoadableSource ?? ExternalSourceLoad(source)) : nil
     }
 
     /// Reads an observable expression. A domain `nil` is an available value.
@@ -78,6 +77,19 @@ public struct Input<Value: Sendable> {
                 reportedFailures: { state.errors() }
             )
         }, loadSource: loadSource)
+    }
+}
+
+@MainActor
+private final class ExternalSourceLoad: LoadableSource {
+    private let source: any UpdateSource
+
+    init(_ source: any UpdateSource) { self.source = source }
+
+    var loadIdentity: ObjectIdentifier { ObjectIdentifier(source) }
+
+    func load(in context: SourceLoadContext) async {
+        await source.load(using: context.policy)
     }
 }
 

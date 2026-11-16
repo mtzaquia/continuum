@@ -57,10 +57,9 @@ struct LoadEntryTests {
         #expect(try await bucket.load(id: 1) == Entry(1, "old"))
         await #expect(throws: ContinuumError.self) { try await bucket.load(id: 2) }
         let invalid = Bucket(IndexedKey<Int, Entry>("invalid")) {
-            RemoteSource(
-                { [Entry(1, "old")] },
-                loadEntry: { (_: Int) in Entry(2, "wrong") }
-            )
+            RemoteSource {
+                [Entry(1, "old")]
+            } loadEntry: { (_: Int) in Entry(2, "wrong") }
         }
         try await invalid.load()
         await #expect(throws: ContinuumError.self) { try await invalid.load(id: 1, using: .remote) }
@@ -140,10 +139,9 @@ struct LoadEntryTests {
         let gate = Gate()
         let bucket = Bucket(IndexedKey<Int, Entry>("replacing-write")) {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
-            RemoteSource(
-                { [Entry(1, "old")] },
-                loadEntry: { try await gate.fetch($0) }
-            )
+            RemoteSource {
+                [Entry(1, "old")]
+            } loadEntry: { try await gate.fetch($0) }
         }
         try await bucket.load()
         writes.block = true
@@ -180,14 +178,16 @@ struct LoadEntryTests {
         #expect(bucket.values == expected)
     }
 
-    @Test("Entry refresh preserves pagination alongside the snapshot Load")
+    @Test("Entry refresh preserves pagination")
     func pagination() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("paged")) {
-            RemoteSource(
-                { Page(value: [Entry(1, "old")], next: 2) },
-                nextPage: NextPage { cursor in Page(value: [Entry(cursor, "page")], next: Optional<Int>.none) },
-                loadEntry: { id in Entry(id, "new") }
-            )
+            RemoteSource {
+                Page(value: [Entry(1, "old")], next: 2)
+            } loadEntry: { id in
+                Entry(id, "new")
+            } nextPage: { cursor in
+                Page(value: [Entry(cursor, "page")], next: nil)
+            }
         }
         try await bucket.load()
         try await bucket.load(id: 1, using: .remote)
@@ -200,10 +200,9 @@ struct LoadEntryTests {
     @Test("Selected indexed partitions support entry loading")
     func partition() async throws {
         let bucket = PartitionedBucket(IndexedKey<Int, Entry>("partitioned"), partitionedBy: String.self) { query in
-            RemoteSource(
-                { [Entry(1, query)] },
-                loadEntry: { id in Entry(id, query) }
-            )
+            RemoteSource {
+                [Entry(1, query)]
+            } loadEntry: { id in Entry(id, query) }
         }
         let selected = bucket["query"]
         #expect(try await selected.load(id: 1) == Entry(1, "query"))
@@ -215,10 +214,9 @@ struct LoadEntryTests {
         let writes = WriteGate()
         let bucket = Bucket(IndexedKey<Int, Entry>("persisting")) {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
-            RemoteSource(
-                { [Entry(1, "old")] },
-                loadEntry: { id in Entry(id, "new") }
-            )
+            RemoteSource {
+                [Entry(1, "old")]
+            } loadEntry: { id in Entry(id, "new") }
         }
         try await bucket.load()
         writes.block = true
@@ -238,13 +236,11 @@ struct LoadEntryTests {
     func pendingPage() async throws {
         let gate = Gate()
         let bucket = Bucket(IndexedKey<Int, Entry>("pending-page")) {
-            RemoteSource(
-                { Page(value: [Entry(1, "old")], next: 2) },
-                nextPage: NextPage { cursor in
-                    Page(value: [try await gate.fetch(cursor)], next: Optional<Int>.none)
-                },
-                loadEntry: { id in Entry(id, "new") }
-            )
+            RemoteSource {
+                Page(value: [Entry(1, "old")], next: 2)
+            } loadEntry: { id in Entry(id, "new") } nextPage: { cursor in
+                Page(value: [try await gate.fetch(cursor)], next: Optional<Int>.none)
+            }
         }
         try await bucket.load()
         let page = Task { try await bucket.loadNext() }
@@ -303,10 +299,9 @@ private actor Service {
 private func makeBucket(_ service: Service) -> IndexedBucket<Int, Entry> {
     Bucket(IndexedKey<Int, Entry>("entries")) {
         LocalSource { Optional<[Entry]>.none } persist: { try await service.persist($0) }
-        RemoteSource(
-            { [Entry(2, "old"), Entry(1, "old")] },
-            loadEntry: { try await service.fetch($0) }
-        )
+        RemoteSource {
+            [Entry(2, "old"), Entry(1, "old")]
+        } loadEntry: { try await service.fetch($0) }
     }
 }
 @Observable private final class Gate {
@@ -322,10 +317,9 @@ private func makeBucket(_ service: Service) -> IndexedBucket<Int, Entry> {
 }
 private func gatedBucket(_ gate: Gate) -> IndexedBucket<Int, Entry> {
     Bucket(IndexedKey<Int, Entry>("gated")) {
-        RemoteSource(
-            { [Entry(1, "old"), Entry(2, "old")] },
-            loadEntry: { try await gate.fetch($0) }
-        )
+        RemoteSource {
+            [Entry(1, "old"), Entry(2, "old")]
+        } loadEntry: { try await gate.fetch($0) }
     }
 }
 private func until(_ condition: @escaping @MainActor () -> Bool) async {

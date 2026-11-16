@@ -342,11 +342,9 @@ struct FreshnessTests {
             staleAfter: .seconds(10),
             now: { time.instant },
             configuration: BucketConfiguration(remoteSources: [
-                RemoteSource(
-                    { Page(values: [try await service.load()], next: 1) },
-                    nextPage: NextPage { (_: Int) in Page(values: [2], next: Optional<Int>.none) },
-                    loadEntry: { (id: Int) in id }
-                ),
+                RemoteSource {
+                    Page(values: [try await service.load()], next: 1)
+                } loadEntry: { (id: Int) in id } nextPage: { (_: Int) in Page(values: [2], next: Optional<Int>.none) },
             ])
         )
         try await bucket.load()

@@ -657,6 +657,39 @@ struct CompositionTests {
         #expect(success(parent.latest) == 3)
     }
 
+    @Test("External source loads are deduplicated by source identity across inputs")
+    func sharedExternalSourceLoading() async {
+        var policies: [LoadPolicy] = []
+        let source: any UpdateSource<Int> = QuerySource { policy in
+            policies.append(policy)
+            return 3
+        }
+        let child = Composition { Input(source) } transform: { $0 }
+        let parent = Composition {
+            Input(child)
+            Input(source)
+            Input(source).optional()
+        } transform: { $0 + $1 + ($2 ?? 0) }
+
+        let passive = Composition { Input(source, loads: false) } transform: { $0 }
+        await passive.load(using: .remote)
+        #expect(policies.isEmpty)
+        #expect(isReset(passive.latest))
+
+        await parent.load(using: .cachedThenRemote)
+        #expect(policies == [.cachedThenRemote])
+        #expect(success(parent.latest) == 9)
+    }
+
+    @Test("A bucket still loads through the public source contract")
+    func bucketAsUpdateSource() async {
+        let bucket = Bucket(Key<Int>("composition.erased-bucket")) { RemoteSource { 5 } }
+        let source: any UpdateSource<Int> = bucket
+
+        await source.load(using: .remote)
+        #expect(success(source.latest) == 5)
+    }
+
     @Test("Built-in sources load once across direct and nested inputs per call")
     func sharedBucketLoading() async {
         let bucketCalls = LocalLoadCalls()
@@ -1052,7 +1085,7 @@ private func isFailure<T>(_ update: Update<T>?) -> Bool {
 }
 
 @MainActor @Observable
-private final class QuerySource<Value: Sendable>: UpdateSource, LoadableSource {
+private final class QuerySource<Value: Sendable>: UpdateSource {
     private(set) var latest: Update<Value>
     private var generation: UInt = 0
     private let fetch: @MainActor (LoadPolicy) async throws -> Value
@@ -1065,11 +1098,11 @@ private final class QuerySource<Value: Sendable>: UpdateSource, LoadableSource {
         self.fetch = fetch
     }
 
-    func load(in context: SourceLoadContext) async {
+    func load(using policy: LoadPolicy) async {
         generation &+= 1
         let request = generation
         do {
-            let value = try await fetch(context.policy)
+            let value = try await fetch(policy)
             guard generation == request, !Task.isCancelled else { return }
             latest = .result(.success(value))
         } catch {

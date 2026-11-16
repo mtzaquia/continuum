@@ -16,8 +16,8 @@ let overview = Composition {
 
 | Input | Behavior |
 | --- | --- |
-| `Input(source)` | Observe an `UpdateSource`. Buckets and nested compositions also participate in loading. |
-| `Input(source, loads: false)` | Observe a Continuum source without loading it through this input. |
+| `Input(source)` | Observe an `UpdateSource` and forward composition load requests to it. |
+| `Input(source, loads: false)` | Observe a source without loading it through this input. |
 | `Input { expression }` | Read an always-available value and track the observable properties it reads. |
 | `.optional()` | Supply `nil` when the input is unavailable or failed. Its error still contributes to `Composition.error`. |
 
@@ -32,7 +32,7 @@ await overview.load(using: .remote)
 try await repo.fundingSources[cardID].reset()
 ```
 
-`load(using:)` forwards the policy unchanged and loads independent Continuum sources concurrently. The same source loads once per top-level call, even across nested compositions. `isLoading` stays true while one or more calls are active. Before returning, `load` processes pending observations of the composition's inputs. When only errors change, it can update `error` without rerunning the transform.
+`load(using:)` forwards the policy unchanged and loads independent sources concurrently. The same source loads once per top-level call, even across nested compositions. `isLoading` stays true while one or more calls are active. Before returning, `load` processes pending observations of the composition's inputs. When only errors change, it can update `error` without rerunning the transform.
 
 Call reset, pagination, entry loading, and mutations on the source that owns the data. [Bucket loading policies](loading.md)
 
@@ -86,7 +86,7 @@ The input reuses matching entries already loaded in the related bucket, includin
 
 ## Observe an external source
 
-`UpdateSource<Snapshot>` is the public observation protocol behind `Input(source)`. Apps and libraries can conform a main-actor observable class with a `Sendable` snapshot. External sources own when they fetch, reset, or subscribe to upstream events. Call those operations directly.
+`UpdateSource<Snapshot>` is the public input contract behind `Input(source)`. Apps and libraries can conform a main-actor observable class with a `Sendable` snapshot. Implement `load(using:)` to respond to composition loads. Its default is a no-op for sources that only publish updates. The source owns its fetch, reset, and subscription behavior.
 
 ```swift
 import Continuum
@@ -96,13 +96,16 @@ import Observation
 @Observable
 final class UnreadCountSource: UpdateSource {
   private(set) var latest: Update<Int> = .reset
+  private let fetch: @MainActor (LoadPolicy) async -> Update<Int>
 
-  func receive(_ count: Int) {
-    latest = .result(.success(count))
+  init(fetch: @escaping @MainActor (LoadPolicy) async -> Update<Int>) {
+    self.fetch = fetch
   }
 
-  func reset() {
-    latest = .reset
+  func load(using policy: LoadPolicy) async {
+    let update = await fetch(policy)
+    guard !Task.isCancelled else { return }
+    latest = update
   }
 }
 

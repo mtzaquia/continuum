@@ -24,10 +24,9 @@ Configure `loadEntry:` beside the complete snapshot loader.
 
 ```swift
 let authors: IdentifiedBucket<Author> = Bucket(IndexedKey("authors")) {
-  RemoteSource(
-    { try await client.authors() },
-    loadEntry: { id in try await client.author(id: id) }
-  )
+  RemoteSource {
+    try await client.authors()
+  } loadEntry: { id in try await client.author(id: id) }
 }
 
 let author = try await authors.load(id: authorID)
