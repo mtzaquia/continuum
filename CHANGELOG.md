@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0-beta.12
+## 2.0.0
 
 - `Bucket<Space, Operation>` owns one snapshot. `PartitionedBucket` selects the same bucket type by key. `ValueBucket` replaces `DataBucket`, and indexed collections have `IdentifiedBucket` aliases for `Identifiable` models.
 - Configure `RemoteSource` with a trailing snapshot or first-page closure followed by `loadEntry:` and `nextPage:` closures as needed. For nested collection pagination, specify `accumulating:` and `indexedBy:` on `RemoteSource`.
