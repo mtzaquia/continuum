@@ -20,201 +20,91 @@
 //  SOFTWARE.
 //
 
-/// An observed bucket, composition, or expression with an optional loading action.
-///
-/// Inputs are required by default. Use ``optional()`` to supply `nil` when
-/// unavailable or failed. Omitting the loading closure makes this input observe
-/// only. Construction does not load the source.
+/// An observed source or expression. Required inputs gate the transform.
 @MainActor
 public struct Input<Value: Sendable> {
     let read: @MainActor () -> CompositionInputState<Value>
-    let load: (@MainActor @Sendable (LoadPolicy) async -> Void)?
-    private var materialize: (@MainActor () -> Input<Value>)? = nil
+    let loadSource: (any LoadableSource)?
 
-    /// Observes a bucket, selected partition, or composition without loading it.
-    public init<Source: UpdateSource>(_ source: Source)
-    where Source.Snapshot == Value {
-        self.init(source, loader: nil)
-    }
-
-    /// Observes a source and forwards composition load policies to an action.
+    /// Observes a Continuum or external ``UpdateSource``.
     ///
-    /// The action updates the observed source; its completion alone does not
-    /// establish a snapshot. Errors already reported by the source follow its
-    /// recovery. Other action errors remain until the next load of this input.
-    public init<Source: UpdateSource>(
-        _ source: Source,
-        load: @escaping @MainActor (LoadPolicy) async throws -> Void
-    ) where Source.Snapshot == Value {
-        self.init(source, loader: CompositionLoad(load, sourceReportsFailure: {
-            if case .result(.failure) = source.latest { return true }
-            return false
-        }))
-    }
-
-    /// Observes an expression without loading it.
-    ///
-    /// Observable properties read by the closure trigger recomputation. The
-    /// closure is reevaluated on the main actor and should be free of side
-    /// effects. Its returned value, including a domain `nil`, is available.
-    public init(_ read: @escaping @MainActor () -> Value) {
-        self.init(read: { .init(value: read(), unavailable: false, failures: []) })
-    }
-
-    /// Observes an expression and supplies an action to update its observable state.
-    ///
-    /// The policy is forwarded unchanged. A thrown action error fails this input
-    /// until its next load; use ``optional()`` to make such failures contribute nil.
-    public init(
-        _ read: @escaping @MainActor () -> Value,
-        load: @escaping @MainActor (LoadPolicy) async throws -> Void
-    ) {
-        let loader = CompositionLoad(load)
-        self.init(read: {
-            .init(value: read(), unavailable: false,
-                  failures: loader.error.map { [$0] } ?? [])
-        }, load: { policy in await loader.run(policy) })
-    }
-
-    /// Bridges a sequence of results into the composition's required inputs.
-    ///
-    /// The factory is invoked once per composition and again on loads configured
-    /// with `.restart`. Before the first element this input is unavailable.
-    /// Failures are outcomes; normal completion retains the last outcome. An
-    /// iteration error becomes a failure and ends that subscription. Use
-    /// ``optional()`` to turn unavailable and failed outcomes into nil.
-    ///
-    /// Resubscription cancels the old iterator, retains the current outcome, and
-    /// creates a new iterator before invoking `load`. It does not wait for an
-    /// element or guarantee upstream hot-stream readiness. Obsolete elements
-    /// and errors are ignored. Releasing the composition cancels its subscription.
-    ///
-    /// - Parameters:
-    ///   - updates: Creates a fresh sendable sequence of results for each subscription.
-    ///   - subscriptionOnLoad: Whether loading preserves or replaces the subscription.
-    ///   - load: An optional action receiving the composition's loading policy.
-    public init<Source: AsyncSequence & Sendable, Failure: Error>(
-        updates: @escaping @MainActor () -> Source,
-        subscriptionOnLoad: InputSubscriptionBehavior = .keep,
-        load: (@MainActor (LoadPolicy) async throws -> Void)? = nil
-    ) where Source.Element == Result<Value, Failure> {
-        self.init(read: { .init(value: nil, unavailable: true, failures: []) }, materialize: {
-            let state = SequenceInputState<Value>(updates)
-            state.subscribe()
-            let loader = CompositionLoad { policy in
-                if case .restart = subscriptionOnLoad { state.subscribe() }
-                try await state.waitUntilSubscribed()
-                try await load?(policy)
-            }
-            let action: (@MainActor @Sendable (LoadPolicy) async -> Void)?
-            if load != nil || subscriptionOnLoad == .restart {
-                action = { policy in await loader.run(policy) }
-            } else {
-                action = nil
-            }
-            return Input(read: {
-                if let error = loader.error {
-                    return .init(value: nil, unavailable: false, failures: [error])
-                }
-                switch state.result {
-                case .success(let value):
-                    return .init(value: value, unavailable: false, failures: [])
-                case .failure(let error):
-                    return .init(value: nil, unavailable: false, failures: [error])
-                case nil:
-                    return .init(value: nil, unavailable: true, failures: [])
-                }
-            }, load: action)
-        })
-    }
-
-    private init<Source: UpdateSource>(
-        _ source: Source, loader: CompositionLoad?
-    ) where Source.Snapshot == Value {
+    /// Composition loads forward their policy to the source by default.
+    /// Set `loads` to `false` to observe it without forwarding loads.
+    public init(_ source: any UpdateSource<Value>, loads: Bool = true) {
+        let resetSource = source as? any CompositionResetSource
         read = {
-            let update = source.latest
-            let loadError = loader?.error
-            let resetRevision = (source as? any CompositionResetSource)?.compositionResetRevision ?? 0
-            switch update {
-            case .reset:
-                return .init(value: nil, unavailable: true,
-                             failures: loadError.map { [$0] } ?? [], resetRevision: resetRevision)
-            case .result(.failure(let error)):
-                return .init(value: nil, unavailable: false, failures: [error], resetRevision: resetRevision)
-            case .result(.success(let value)):
-                return .init(value: value, unavailable: false,
-                             failures: loadError.map { [$0] } ?? [], resetRevision: resetRevision)
-            }
+            let outcome = source.latest
+            return .init(outcome: outcome, resetRevision: resetSource?.resetRevision ?? 0, reportedFailures: {
+                if let child = source as? Composition<Value> { return child.underlyingErrors }
+                if case .result(.failure) = outcome { return nil }
+                return source.error.map { [$0] }
+            })
         }
-        if let loader {
-            load = { policy in await loader.run(policy) }
-        } else {
-            load = nil
-        }
+        loadSource = loads ? (source as? any LoadableSource ?? ExternalSourceLoad(source)) : nil
+    }
+
+    /// Reads an observable expression. A domain `nil` is an available value.
+    public init(_ read: @escaping @MainActor () -> Value) {
+        self.init(read: { .init(outcome: .result(.success(read()))) })
     }
 
     init(
         read: @escaping @MainActor () -> CompositionInputState<Value>,
-        load: (@MainActor @Sendable (LoadPolicy) async -> Void)? = nil,
-        materialize: (@MainActor () -> Input<Value>)? = nil
+        loadSource: (any LoadableSource)? = nil
     ) {
         self.read = read
-        self.load = load
-        self.materialize = materialize
+        self.loadSource = loadSource
     }
 
-    func resolved() -> Self { materialize?() ?? self }
-
-    /// Makes unavailable and failed snapshots contribute `nil` without blocking output.
-    ///
-    /// Loading participation is preserved. Optional input errors do not fail
-    /// the composition.
-    // Prefer the flattening overload when Value is already Optional, even
-    // when the caller provides no contextual return type.
+    /// Supplies `nil` for an unavailable or failed input and retains its errors.
     @_disfavoredOverload
     public func optional() -> Input<Value?> {
-        var factory: (@MainActor () -> Input<Value?>)?
-        if let materialize { factory = { materialize().optional() } }
-        return Input<Value?>(read: {
-            let state = read()
-            return .init(value: .some(state.failures.isEmpty ? state.value : nil),
-                         unavailable: false, failures: [])
-        }, load: load, materialize: factory)
+        optional { $0 }
     }
 
-    /// Relaxes an already-optional input without adding another optional layer.
-    ///
-    /// A loaded `nil`, an unavailable snapshot, and a failed input all contribute
-    /// `nil`. Loading participation is preserved. Without this modifier, an
-    /// optional-valued snapshot remains required and propagates failures.
-    public func optional<Wrapped: Sendable>() -> Input<Wrapped?>
-    where Value == Wrapped? {
-        var factory: (@MainActor () -> Input<Wrapped?>)?
-        if let materialize { factory = { materialize().optional() } }
-        return Input<Wrapped?>(read: {
+    /// Relaxes an optional snapshot while keeping a single optional layer.
+    public func optional<Wrapped: Sendable>() -> Input<Wrapped?> where Value == Wrapped? {
+        optional { $0 ?? nil }
+    }
+
+    private func optional<Wrapped: Sendable>(
+        _ flatten: @escaping @MainActor (Value?) -> Wrapped?
+    ) -> Input<Wrapped?> {
+        Input<Wrapped?>(read: {
             let state = read()
-            let value: Wrapped? = state.failures.isEmpty ? (state.value ?? nil) : nil
-            return .init(value: .some(value), unavailable: false, failures: [])
-        }, load: load, materialize: factory)
+            return .init(
+                outcome: .result(.success(flatten(state.outcome.snapshot))),
+                reportedFailures: { state.errors() }
+            )
+        }, loadSource: loadSource)
     }
 }
 
-/// Typed inputs accumulated by ``CompositionBuilder``.
+@MainActor
+private final class ExternalSourceLoad: LoadableSource {
+    private let source: any UpdateSource
+
+    init(_ source: any UpdateSource) { self.source = source }
+
+    var loadIdentity: ObjectIdentifier { ObjectIdentifier(source) }
+
+    func load(in context: SourceLoadContext) async {
+        await source.load(using: context.policy)
+    }
+}
+
+/// Typed dependencies accumulated by ``CompositionBuilder``.
 @MainActor
 public struct CompositionInputs<each Value: Sendable> {
-    let makeInputs: @MainActor () -> (repeat Input<each Value>)
+    let inputs: (repeat Input<each Value>)
 }
 
-/// Builds a fixed list of typed dependencies, selecting branches at construction.
-///
-/// Both branches must produce the same value types in the same order. An `if`
-/// without `else` makes each contained input optional. Loops are not supported.
+/// Combines typed dependencies, selecting conditional branches at construction.
 @MainActor
 @resultBuilder
 public enum CompositionBuilder {
-    /// Adds one snapshot or observable expression.
     public static func buildExpression<T>(_ input: Input<T>) -> CompositionInputs<T> {
-        .init(makeInputs: { input.resolved() })
+        .init(inputs: input)
     }
 
     /// Starts a list of inputs.
@@ -227,11 +117,9 @@ public enum CompositionBuilder {
         accumulated: CompositionInputs<repeat each A>,
         next: CompositionInputs<repeat each B>
     ) -> CompositionInputs<repeat each A, repeat each B> {
-        .init(makeInputs: {
-            let a = accumulated.makeInputs()
-            let b = next.makeInputs()
-            return (repeat each a, repeat each b)
-        })
+        let a = accumulated.inputs
+        let b = next.inputs
+        return .init(inputs: (repeat each a, repeat each b))
     }
 
     /// Selects the first branch with a matching output shape.
@@ -249,15 +137,13 @@ public enum CompositionBuilder {
         _ component: CompositionInputs<repeat each T>?
     ) -> CompositionInputs<repeat (each T)?> {
         if let component {
-            return .init(makeInputs: {
-                let inputs = component.makeInputs()
-                return (repeat (each inputs).optional())
-            })
+            let inputs = component.inputs
+            return .init(inputs: (repeat (each inputs).optional()))
         }
-        return .init(makeInputs: { (repeat absent((each T).self)) })
+        return .init(inputs: (repeat absent((each T).self)))
     }
 
     private static func absent<T: Sendable>(_: T.Type) -> Input<T?> {
-        Input<T?>(read: { .init(value: .some(nil), unavailable: false, failures: []) })
+        Input { Optional<T>.none }
     }
 }

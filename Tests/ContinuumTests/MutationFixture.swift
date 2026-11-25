@@ -1,0 +1,23 @@
+@testable import Continuum
+import Testing
+
+extension Bucket where Operation == MutationAction<Space> {
+    func put(_ value: Space.Value) async throws {
+        try #require(isLoaded)
+        let key = keySpace
+        try await mutate { mutation in
+            try await mutation.update { key.storing(value, in: $0) }
+        }
+    }
+
+    func delete(_ input: Space.Input) async throws {
+        let key = keySpace
+        try await mutate { mutation in
+            try await mutation.update { key.removing(input, from: $0) }
+        }
+    }
+
+    func delete() async throws where Space.Input == SingletonInput {
+        try await mutate { try await $0.update { _ in nil } }
+    }
+}

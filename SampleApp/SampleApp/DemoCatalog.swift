@@ -14,6 +14,11 @@ nonisolated enum CatalogData {
     static let recommendations = IndexedKey<Int, Product>("sample.recommendations")
 }
 
+nonisolated enum CatalogMutation: Sendable {
+    case store(Product)
+    case remove(Int)
+}
+
 nonisolated enum Shelf: String, CaseIterable, Identifiable, Sendable {
     case home
     case office
@@ -41,7 +46,7 @@ nonisolated struct DemoActivity: Identifiable, Sendable {
 
 @Observable
 final class DemoCatalog {
-    let products: IndexedBucket<Int, Product>
+    let products: MutableIndexedBucket<Int, Product, CatalogMutation>
     let recommendations: PartitionedIndexedBucket<Shelf, Int, Product>
 
     private(set) var activity = [
@@ -70,24 +75,33 @@ final class DemoCatalog {
                 await cache.persist(snapshot)
             }
             RemoteSource {
-                Load {
-                    let page = try await remote.products(after: nil)
-                    return Page(values: page.values, next: page.next)
-                }
-                NextPage { cursor in
-                    let page = try await remote.products(after: cursor)
-                    return Page(values: page.values, next: page.next)
-                }
-                Store { product in
-                    try await remote.store(product)
-                }
-                Remove { id in
-                    try await remote.remove(id: id)
+                let page = try await remote.products(after: nil)
+                return Page(values: page.values, next: page.next)
+            } nextPage: { cursor in
+                let page = try await remote.products(after: cursor)
+                return Page(values: page.values, next: page.next)
+            }
+            Mutate { (operation: CatalogMutation, mutation) in
+                switch operation {
+                case .store(let product):
+                    try await mutation.update { snapshot in
+                        CatalogData.products.storing(product, in: snapshot)
+                    } remote: {
+                        _ = try await remote.store(product)
+                        return .acknowledged
+                    }
+                case .remove(let id):
+                    try await mutation.update { snapshot in
+                        CatalogData.products.removing(id, from: snapshot)
+                    } remote: {
+                        try await remote.remove(id: id)
+                        return .acknowledged
+                    }
                 }
             }
         }
 
-        recommendations = Bucket(
+        recommendations = PartitionedBucket(
             CatalogData.recommendations,
             partitionedBy: Shelf.self
         ) { shelf in
@@ -147,26 +161,26 @@ final class DemoCatalog {
         let product = Product(
             id: Int.random(in: 100...999),
             name: "A new server item",
-            detail: "Stored remotely, persisted locally, then published",
+            detail: "Added optimistically, then confirmed by the server",
             price: 18
         )
         record(
             .mutation,
             title: "Store mutation started",
-            detail: "Remote → local persistence → observable memory."
+            detail: "The bucket publishes and persists the optimistic edit before the request."
         )
         do {
-            try await products.store(product)
+            try await products.mutate(.store(product))
             record(
                 .success,
                 title: "Server item stored",
-                detail: "The authoritative value is now part of the atomic snapshot."
+                detail: "The server confirmed the optimistic edit."
             )
         } catch {
             record(
                 .failure,
                 title: "Store mutation failed",
-                detail: "Memory was left unchanged."
+                detail: "The bucket rolled back the optimistic edit."
             )
         }
     }
@@ -175,10 +189,10 @@ final class DemoCatalog {
         record(
             .mutation,
             title: "Remove mutation started",
-            detail: "\(product.name) will be removed remotely before local publication."
+            detail: "The bucket removes \(product.name) while the request is in flight."
         )
         do {
-            try await products.remove(product.id)
+            try await products.mutate(.remove(product.id))
             record(
                 .success,
                 title: "Product removed",

@@ -1,62 +1,54 @@
-# Mutate remote values
+# Mutate a bucket snapshot
 
-Declare `Load`, followed by optional `Store` and `Remove` capabilities inside
-`RemoteSource`. Consumers keep using the bucket's ordinary mutation methods.
+Declare a `Mutate` handler beside the bucket's sources. Its first parameter is the operation accepted by `mutate(_:)`. The handler runs at the front of that bucket's mutation queue.
 
 ```swift
+enum PostEdit: Sendable {
+  case rename(Post.ID, title: String)
+}
+
 let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
-  RemoteSource {
-    Load { try await client.posts() }
-    Store { post in try await client.store(post) }
-    Remove { id in try await client.removePost(id: id) }
+  RemoteSource { try await client.posts() }
+  Mutate { (edit: PostEdit, mutation) in
+    switch edit {
+    case let .rename(id, title):
+      try await mutation.update(id: id) { post in
+        post.renamed(to: title)
+      } remote: {
+        .updated(try await client.renamePost(id: id, title: title))
+      }
+    }
   }
 }
 
-try await posts.store(draft)
-try await posts.remove(postID)
+try await posts.load()
+try await posts.mutate(.rename(postID, title: "Draft"))
 ```
 
-Each capability appears at most once, in that order. Optional `LoadEntry` goes
-before `Store` and `Remove`; see [entry loading](loading.md#load-one-indexed-entry). Omitting one keeps the
-corresponding mutation local-only. A read-only source can use
-`RemoteSource { try await client.posts() }`.
+`update(id:)` edits an indexed entry. `update` edits the complete snapshot. The bucket publishes the edit, persists it to writable local sources, then runs `remote:`. Return `.acknowledged` to keep the edit or `.updated(value)` to publish and persist the server's entry or snapshot. Omit `remote:` for a local edit. A server entry can change the edited entry's ID.
 
-## Reconcile server-assigned values
+An edit requires an established snapshot, including a loaded empty collection. An entry edit also requires that ID to be present. On a miss, the paired endpoint can still run, while publication and persistence for that edit are skipped. A handler can also call a remote endpoint directly without editing the snapshot.
 
-`Store` can return the authoritative model, including a server-assigned ID:
+## Annotate a typed bucket
+
+| Snapshot | Standalone | Partitioned |
+| --- | --- | --- |
+| Single value | `MutableValueBucket<Value, Operation>` | `PartitionedMutableValueBucket<Partition, Value, Operation>` |
+| Indexed by `Identifiable.id` | `MutableIdentifiedBucket<Value, Operation>` | `PartitionedMutableIdentifiedBucket<Partition, Value, Operation>` |
+| Custom index | `MutableIndexedBucket<ID, Value, Operation>` | `PartitionedMutableIndexedBucket<Partition, ID, Value, Operation>` |
+
+For a custom key space, spell the types `Bucket<Space, Operation>` and `PartitionedBucket<Partition, Space, Operation>`.
+
+## Supply a mutation closure at the call site
+
+A bucket without a typed handler accepts a closure through the same method.
 
 ```swift
-Store { draft in
-  try await client.createPost(draft)
+try await favorites.mutate { mutation in
+  try await mutation.update { posts in
+    posts.filter { $0.id != postID }
+  }
 }
 ```
 
-Continuum replaces the submitted indexed identity when the returned identity
-differs. If the server only acknowledges the write, the `Void`-returning overload
-retains the submitted model:
-
-```swift
-Store { post in
-  try await client.put(post)
-}
-```
-
-For a singleton bucket, consumers call `remove()` without an argument. Its
-remote capability can be written `Remove<SingletonInput> { ... }`.
-
-## Understand failure and ordering
-
-Mutations publish optimistically and persist locally before contacting the
-server. Reconciliation publishes and persists the authoritative snapshot.
-Failure restores the previous snapshot if the mutation still owns the state;
-remote side effects cannot be undone by local rollback.
-
-Concurrent mutations are serialized. Reset and `.remote` loads supersede them;
-`.cachedThenRemote` and `loadNext()` wait. Cancellation restores state only while
-the mutation still owns it. See [Operation ordering](operation-ordering.md) and
-[Persistence](persistence.md) for the complete contracts.
-
-In a paginated source, place `Store` and `Remove` after `NextPage`. Mutations
-update the accumulated snapshot while preserving its cursor.
-
-Next: [Pagination](pagination.md) · [Persistence](persistence.md)
+Return `nil` from the snapshot edit to clear availability. Return `[]` to keep an established empty collection. If the handler throws or is cancelled, Continuum rolls back the snapshot and attempts to restore persistence while the handler still owns it. A server side effect may outlive that rollback. Use the mutation handle only during its invocation and await edits sequentially. [Operation ordering](operation-ordering.md) · [Persistence](persistence.md)

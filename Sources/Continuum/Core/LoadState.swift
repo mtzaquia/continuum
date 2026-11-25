@@ -26,7 +26,7 @@
 /// independent. A refresh or reset can therefore fail while
 /// ``isLoaded`` remains `true`.
 public struct LoadState: Sendable {
-    /// Whether source work is currently active.
+    /// Whether a full snapshot load is active.
     public let isLoading: Bool
 
     /// Whether the bucket has established a complete snapshot.
@@ -34,11 +34,11 @@ public struct LoadState: Sendable {
     /// A successfully loaded empty indexed snapshot sets this value to `true`.
     public let isLoaded: Bool
 
-    /// The latest snapshot-loading, mutation, persistence, or invalidation error.
+    /// The latest collection load, entry load, mutation, persistence, or invalidation error.
     ///
-    /// Starting source work or a mutation clears the previous error. A cached
-    /// memory hit preserves it. A reset clears it on success. Continuation failures are reported separately by
-    /// ``PaginationState``.
+    /// A collection load retains the previous error until it settles. A cached
+    /// memory hit preserves it. An entry fetch, mutation, or reset clears it.
+    /// Continuation failures are reported separately by ``PaginationState``.
     public let error: (any Error)?
 
     init(

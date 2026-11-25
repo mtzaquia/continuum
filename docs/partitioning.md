@@ -1,70 +1,29 @@
 # Partition a bucket
 
-Use partitions when the same snapshot shape has independent identities, such as
-account lists for different purposes or pages for different search queries.
+Use `PartitionedBucket` when the same snapshot shape has independent identities. For example, each account can have its own ordered list of posts.
 
 ```swift
-nonisolated enum Purpose: Hashable, Sendable {
-  case buy, sell
+let postsByAccount: PartitionedIdentifiedBucket<Account.ID, Post> = PartitionedBucket(
+  IndexedKey("account-posts"),
+  partitionedBy: Account.ID.self
+) { accountID in
+  RemoteSource { try await client.posts(accountID: accountID) }
 }
 
-let accounts = Bucket(
-  IndexedKey<Account.ID, Account>("accounts"),
-  partitionedBy: Purpose.self
-) { purpose in
-  LocalSource { try await database.accounts(purpose: purpose) }
-  RemoteSource { try await client.accounts(purpose: purpose) }
-}
-
-let buying = accounts[.buy]
-try await buying.load()
-print(buying.values)
+let posts = postsByAccount[accountID]
+try await posts.load()
 ```
 
-The first access creates a `BucketPartition`. Equal keys return the same
-partition. Each owns its values, errors, source work, persistence, and pagination.
-A load or reset of `.buy` does not affect `.sell`.
+Subscripting creates a `Bucket` on first access and reuses it for equal keys. Load, mutate, reset, paginate, or pass that selected bucket to `Input`. Each bucket owns its own snapshot, error, freshness, in-flight work, and pagination cursor. Configure local storage with the partition key if snapshots need distinct destinations.
 
-Add `staleAfter: .seconds(300)` after `partitionedBy:` to give each partition
-its own freshness interval. A refresh of `.buy` does not renew `.sell`.
-[Snapshot freshness →](loading.md#refresh-stale-snapshots)
+Partition keys must be `Hashable & Sendable`. Combine fields in a value type when several fields identify one snapshot. The container retains every accessed bucket. For unbounded keys such as search text, scope the container to a session. [Resource lifetime](resource-lifetime.md)
 
-`IndexedKey` uses an identifiable model's `id`. For a different index, pass
-`indexedBy: \.code` or a sendable closure. Stored key-path variables must retain
-`& Sendable` in their declared type.
+## Choose a bucket type
 
-Partition keys must be `Hashable & Sendable`. Use a single query struct when
-several fields identify a snapshot; authentication or tracing context belongs
-in the captured dependencies. Value-only domain types should be `nonisolated`
-in projects with default main-actor isolation.
+| Snapshot | Standalone | Partitioned |
+| --- | --- | --- |
+| One value (`Key`) | `ValueBucket<Value>` | `PartitionedValueBucket<Partition, Value>` |
+| Collection indexed by `Identifiable.id` | `IdentifiedBucket<Value>` | `PartitionedIdentifiedBucket<Partition, Value>` |
+| Collection with a custom index | `IndexedBucket<ID, Value>` | `PartitionedIndexedBucket<Partition, ID, Value>` |
 
-## Observe and compose selected partitions
-
-```swift
-for await update in accounts[.buy] { /* Handle Update<[Account]>. */ }
-
-let comparison = Composition {
-  Input(accounts[.buy])
-  Input(accounts[.sell]).optional()
-} transform: { buying, selling in
-  buying.count + (selling?.count ?? 0)
-}
-```
-
-Select a partition before reading `latest` or iterating: the outer bucket has no
-combined outcome. The example inputs observe only; attach loading closures to
-make them participate in composition loads.
-
-Use [entry loading](loading.md#load-one-indexed-entry) to fetch an individual
-entity from an indexed collection. For
-[relationship resolution](composition.md#resolve-relationships), pass the indexed
-bucket or select a query partition explicitly; foreign keys identify entries.
-
-## Bound partition identities
-
-The outer bucket retains every accessed partition until released. Reset clears
-data without evicting partitions or stopping their invalidation subscriptions.
-Prefer bounded identities, or scope repositories using arbitrary queries to a
-session lifetime. [Ownership details →](resource-lifetime.md)
-
-Next: [Loading](loading.md) · [Compositions](composition.md)
+For a custom index, pass `indexedBy:` with a sendable key path or closure. When storing a key path separately, preserve its `& Sendable` type. For buckets with typed operations, use the [mutation aliases](remote-mutations.md#annotate-a-typed-bucket).

@@ -53,7 +53,7 @@ nonisolated public struct IndexedKey<
 
     /// Creates a typed indexed key using an identifiable value's `id`.
     ///
-    /// The ``Identifiable`` conformance must be nonisolated because buckets
+    /// The `Identifiable` conformance must be nonisolated because buckets
     /// derive indices from sendable source results. In a target with default
     /// `MainActor` isolation, declare the domain value itself `nonisolated`.
     /// The namespace must not be empty, and the version must be greater than
@@ -200,7 +200,7 @@ public typealias IndexedBucket<
     Value: Sendable
 > = Bucket<
     IndexedKey<Index, Value>,
-    UnpartitionedBucketScope
+    MutationAction<IndexedKey<Index, Value>>
 >
 
 /// A partitioned observable bucket whose partitions each own one atomic
@@ -209,4 +209,19 @@ public typealias PartitionedIndexedBucket<
     Partition: Hashable & Sendable,
     Index: Hashable & Sendable,
     Value: Sendable
-> = PartitionedBucket<Partition, IndexedKey<Index, Value>>
+> = PartitionedBucket<Partition, IndexedKey<Index, Value>, MutationAction<IndexedKey<Index, Value>>>
+
+/// An unpartitioned indexed collection with a typed mutation operation.
+public typealias MutableIndexedBucket<
+    Index: Hashable & Sendable,
+    Value: Sendable,
+    Operation: Sendable
+> = Bucket<IndexedKey<Index, Value>, Operation>
+
+/// A bucket whose partitions each own an indexed collection and accept a typed mutation operation.
+public typealias PartitionedMutableIndexedBucket<
+    Partition: Hashable & Sendable,
+    Index: Hashable & Sendable,
+    Value: Sendable,
+    Operation: Sendable
+> = PartitionedBucket<Partition, IndexedKey<Index, Value>, Operation>

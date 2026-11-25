@@ -6,7 +6,7 @@ import Testing
 struct ObservationLifetimeTests {
     @Test("Accessed partitions live until their owning bucket is released")
     func partitionRetention() {
-        var bucket: PartitionedDataBucket<Int, Int>? = Bucket(
+        var bucket: PartitionedValueBucket<Int, Int>? = PartitionedBucket(
             Key<Int>("lifetime.partition"), partitionedBy: Int.self
         ) { _ in }
         weak var selected = bucket?[42]
@@ -19,10 +19,12 @@ struct ObservationLifetimeTests {
     @Test("Cancelling iteration releases the observed source")
     func cancellationReleasesSource() async {
         let (released, release) = AsyncStream<Void>.makeStream()
-        let stream = bucketUpdates(observing: LifetimeSource(release: release)) { $0 }
         let (started, start) = AsyncStream<Void>.makeStream()
         let consumer = Task {
-            for await _ in stream { start.yield(()) }
+            let composition = Composition {
+                Input(LifetimeSource(release: release))
+            } transform: { $0 }
+            for await _ in composition { start.yield(()) }
         }
         var starts = started.makeAsyncIterator()
         _ = await starts.next()
@@ -34,36 +36,31 @@ struct ObservationLifetimeTests {
 
     @Test("A slow consumer retains each result already emitted by observation")
     func slowConsumerBuffersResults() async throws {
-        let bucket = Bucket(Key<Int>("lifetime.buffer"))
-        try await bucket.store(1)
+        let bucket = Bucket(Key<Int>("lifetime.buffer")) { LocalSource { 1 } }
+        try await bucket.load()
         let (evaluated, acknowledgement) = AsyncStream<Int>.makeStream()
-        let stream = bucketUpdates(observing: bucket) { value in
+        let composition = Composition { Input(bucket) } transform: { value in
             acknowledgement.yield(value)
             return value
         }
+        var updates = composition.makeAsyncIterator()
+        if case .result(.success(1))? = await updates.next() {} else {
+            Issue.record("Expected the initial snapshot")
+        }
         var acknowledgements = evaluated.makeAsyncIterator()
         #expect(await acknowledgements.next() == 1)
-        try await bucket.store(2)
+        try await bucket.put(2)
         #expect(await acknowledgements.next() == 2)
-        try await bucket.store(3)
+        try await bucket.put(3)
         #expect(await acknowledgements.next() == 3)
 
-        let consumer = Task {
-            var values: [Int] = []
-            for await update in stream {
-                if case .result(.success(let value)) = update { values.append(value) }
-                if values.count == 3 { return values }
+        for expected in [2, 3] {
+            guard case .result(.success(let value))? = await updates.next() else {
+                Issue.record("Expected a buffered snapshot")
+                return
             }
-            return values
+            #expect(value == expected)
         }
-        #expect(await consumer.value == [1, 2, 3])
-        // Explicit cancellation of iteration terminates the observation even
-        // while the stream value is retained by its caller.
-        let cleanup = Task {
-            for await _ in stream {}
-        }
-        cleanup.cancel()
-        await cleanup.value
     }
 }
 

@@ -34,6 +34,20 @@ struct LoadEntryTests {
         #expect(await service.writes.isEmpty)
     }
 
+    @Test("A failed entry lookup without a list reports an error and leaves the list unavailable")
+    func failedLookupWithoutList() async throws {
+        let service = Service()
+        let bucket = makeBucket(service)
+        await service.failFetch(true)
+        await #expect(throws: Failure.self) { try await bucket.load(id: 1) }
+        #expect(bucket.error is Failure)
+        #expect(isReset(bucket.latest))
+        await service.failFetch(false)
+        #expect(try await bucket.load(id: 1) == Entry(1, "new"))
+        #expect(bucket.error == nil)
+        #expect(isReset(bucket.latest))
+    }
+
     @Test("Missing loaders and incorrect identities throw without changing the collection")
     func invalidConfigurationAndIdentity() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("entries")) {
@@ -44,14 +58,14 @@ struct LoadEntryTests {
         await #expect(throws: ContinuumError.self) { try await bucket.load(id: 2) }
         let invalid = Bucket(IndexedKey<Int, Entry>("invalid")) {
             RemoteSource {
-                Load { [Entry(1, "old")] }
-                LoadEntry { (_: Int) in Entry(2, "wrong") }
-            }
+                [Entry(1, "old")]
+            } loadEntry: { (_: Int) in Entry(2, "wrong") }
         }
         try await invalid.load()
         await #expect(throws: ContinuumError.self) { try await invalid.load(id: 1, using: .remote) }
         #expect(invalid.values == [Entry(1, "old")])
-        #expect(invalid.error == nil)
+        #expect(invalid.error is ContinuumError)
+        #expect(value(invalid.latest) == invalid.values)
     }
 
     @Test("Fetch and persistence errors preserve the list and its successful outcome")
@@ -62,13 +76,20 @@ struct LoadEntryTests {
         let old = bucket.values
         await service.failFetch(true)
         await #expect(throws: Failure.self) { try await bucket.load(id: 1, using: .remote) }
+        #expect(bucket.error is Failure)
+        #expect(value(bucket.latest) == old)
         await service.failFetch(false)
         await service.failWrite(true)
         await #expect(throws: Failure.self) { try await bucket.load(id: 1, using: .remote) }
         #expect(bucket.values == old)
-        #expect(bucket.error == nil)
+        #expect(bucket.state.error is Failure)
         #expect(value(bucket.latest) == old)
         #expect(await service.writes.last! == old)
+        #expect(try await bucket.load(id: 1) == Entry(1, "old"))
+        #expect(bucket.error is Failure)
+        await service.failWrite(false)
+        #expect(try await bucket.load(id: 1, using: .remote) == Entry(1, "new"))
+        #expect(bucket.error == nil)
     }
 
     @Test("Duplicate ID requests share work; different IDs reconcile without losing changes")
@@ -119,9 +140,8 @@ struct LoadEntryTests {
         let bucket = Bucket(IndexedKey<Int, Entry>("replacing-write")) {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
             RemoteSource {
-                Load { [Entry(1, "old")] }
-                LoadEntry { try await gate.fetch($0) }
-            }
+                [Entry(1, "old")]
+            } loadEntry: { try await gate.fetch($0) }
         }
         try await bucket.load()
         writes.block = true
@@ -140,46 +160,6 @@ struct LoadEntryTests {
         #expect(writes.snapshots.last! == [Entry(1, "fresh")])
     }
 
-    @Test("Removing a collection member retains its latest observed relationship value")
-    func retainsLatestObserved() async throws {
-        let service = Service()
-        let bucket = makeBucket(service)
-        let composition = Composition {
-            Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
-        } transform: { _, entries in entries }
-        await composition.load()
-        #expect(value(composition.latest)?[1] == Entry(1, "new"))
-        try await bucket.store(Entry(1, "edited"))
-        await until { value(composition.latest)?[1] == Entry(1, "edited") }
-        var iterator = composition.makeAsyncIterator()
-        _ = await iterator.next()
-        try await bucket.remove(1)
-        #expect(value(try #require(await iterator.next()))?[1] == Entry(1, "edited"))
-        await composition.load(using: .cached)
-        #expect(value(composition.latest)?[1] == Entry(1, "new"))
-    }
-
-    @Test("Collection updates leave entry errors intact until a successful load")
-    func explicitErrorRecovery() async throws {
-        let service = Service()
-        let bucket = makeBucket(service)
-        try await bucket.load()
-        let composition = Composition {
-            Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
-        } transform: { _, entries in entries }
-        await composition.load()
-        await service.failFetch(true)
-        await composition.load(using: .remote)
-        var iterator = composition.makeAsyncIterator()
-        if case .result(.failure)? = await iterator.next() {} else { Issue.record("Expected failure") }
-        try await bucket.store(Entry(2, "Bob"))
-        if case .result(.failure)? = await iterator.next() {} else { Issue.record("Bob must not clear Alice's error") }
-        try await bucket.store(Entry(1, "Alice"))
-        if case .result(.failure)? = await iterator.next() {} else { Issue.record("Stores must not clear load errors") }
-        await composition.load(using: .cached)
-        #expect(value(composition.latest)?[1] == Entry(1, "Alice"))
-    }
-
     @Test("Reset, removal, and a replacement load reject cancellation-uncooperative entry fetches", arguments: [0, 1, 2])
     func supersession(_ operation: Int) async throws {
         let gate = Gate()
@@ -189,7 +169,7 @@ struct LoadEntryTests {
         await until { gate.calls.count == 1 }
         switch operation {
         case 0: try await bucket.reset()
-        case 1: try await bucket.remove(1)
+        case 1: try await bucket.delete(1)
         default: try await bucket.load(using: .remote)
         }
         let expected = bucket.values
@@ -198,15 +178,15 @@ struct LoadEntryTests {
         #expect(bucket.values == expected)
     }
 
-    @Test("Entry refresh preserves pagination and combines with Store and Remove capabilities")
+    @Test("Entry refresh preserves pagination")
     func pagination() async throws {
         let bucket = Bucket(IndexedKey<Int, Entry>("paged")) {
             RemoteSource {
-                Load { Page(value: [Entry(1, "old")], next: 2) }
-                NextPage { cursor in Page(value: [Entry(cursor, "page")], next: Optional<Int>.none) }
-                LoadEntry { id in Entry(id, "new") }
-                Store { (entry: Entry) in entry }
-                Remove { (_: Int) in }
+                Page(value: [Entry(1, "old")], next: 2)
+            } loadEntry: { id in
+                Entry(id, "new")
+            } nextPage: { cursor in
+                Page(value: [Entry(cursor, "page")], next: nil)
             }
         }
         try await bucket.load()
@@ -217,64 +197,16 @@ struct LoadEntryTests {
         #expect(!bucket.hasNextPage)
     }
 
-    @Test("Selected indexed partitions support entry loading and relationships")
+    @Test("Selected indexed partitions support entry loading")
     func partition() async throws {
-        let bucket = Bucket(IndexedKey<Int, Entry>("partitioned"), partitionedBy: String.self) { query in
+        let bucket = PartitionedBucket(IndexedKey<Int, Entry>("partitioned"), partitionedBy: String.self) { query in
             RemoteSource {
-                Load { [Entry(1, query)] }
-                LoadEntry { id in Entry(id, query) }
-            }
+                [Entry(1, query)]
+            } loadEntry: { id in Entry(id, query) }
         }
         let selected = bucket["query"]
         #expect(try await selected.load(id: 1) == Entry(1, "query"))
-        let composition = Composition {
-            Input { [Post(authorID: 1)] }.resolving(\.authorID, from: selected)
-        } transform: { _, entries in entries }
-        await composition.load()
-        #expect(value(composition.latest)?[1] == Entry(1, "query"))
         #expect(!selected.isLoaded)
-    }
-
-    @Test("Relationships combine list entries and fetched values, observe edits, and invalidate on reset")
-    func relationships() async throws {
-        let service = Service()
-        let bucket = makeBucket(service)
-        try await bucket.load()
-        let composition = Composition {
-            Input { [Post(authorID: 1), Post(authorID: 3)] }.resolving(\.authorID, from: bucket)
-        } transform: { _, entries in entries }
-        await composition.load()
-        #expect(value(composition.latest) == [1: Entry(1, "old"), 3: Entry(3, "new")])
-        #expect(bucket[3] == nil)
-        try await bucket.store(Entry(1, "edited"))
-        await until { value(composition.latest)?[1] == Entry(1, "edited") }
-        #expect(value(composition.latest)?[3] == Entry(3, "new"))
-        try await bucket.reset()
-        await until { isReset(composition.latest) }
-        await composition.load()
-        #expect(value(composition.latest)?.count == 2)
-        #expect(!bucket.isLoaded)
-        try await bucket.reset()
-        await until { isReset(composition.latest) }
-    }
-
-    @Test("Relationships can use cached entries without LoadEntry but fail when a fetch needs it")
-    func relationshipWithoutLoader() async throws {
-        let bucket = Bucket(IndexedKey<Int, Entry>("cached-only"))
-        try await bucket.store(Entry(1, "cached"))
-        let composition = Composition {
-            Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
-        } transform: { _, entries in entries }
-        await composition.load()
-        #expect(value(composition.latest)?[1] == Entry(1, "cached"))
-        await composition.load(using: .remote)
-        if case .result(.failure(let error)) = composition.latest {
-            guard case ContinuumError.missingEntrySource = error else {
-                Issue.record("Expected ContinuumError.missingEntrySource, got \(error)")
-                return
-            }
-        } else { Issue.record("Expected required relationship failure") }
-        #expect(bucket[1] == Entry(1, "cached"))
     }
 
     @Test("Reset waits for an entry write and prevents late publication or persistence resurrection")
@@ -283,9 +215,8 @@ struct LoadEntryTests {
         let bucket = Bucket(IndexedKey<Int, Entry>("persisting")) {
             LocalSource { Optional<[Entry]>.none } persist: { try await writes.persist($0) }
             RemoteSource {
-                Load { [Entry(1, "old")] }
-                LoadEntry { id in Entry(id, "new") }
-            }
+                [Entry(1, "old")]
+            } loadEntry: { id in Entry(id, "new") }
         }
         try await bucket.load()
         writes.block = true
@@ -306,11 +237,9 @@ struct LoadEntryTests {
         let gate = Gate()
         let bucket = Bucket(IndexedKey<Int, Entry>("pending-page")) {
             RemoteSource {
-                Load { Page(value: [Entry(1, "old")], next: 2) }
-                NextPage { cursor in
-                    Page(value: [try await gate.fetch(cursor)], next: Optional<Int>.none)
-                }
-                LoadEntry { id in Entry(id, "new") }
+                Page(value: [Entry(1, "old")], next: 2)
+            } loadEntry: { id in Entry(id, "new") } nextPage: { cursor in
+                Page(value: [try await gate.fetch(cursor)], next: Optional<Int>.none)
             }
         }
         try await bucket.load()
@@ -342,24 +271,6 @@ struct LoadEntryTests {
         #expect(bucket[1] == Entry(1, "new"))
         #expect(gate.calls == [1])
     }
-
-    @Test("An entry failure fails the relationship without failing the bucket and is retryable")
-    func relationshipFailure() async throws {
-        let service = Service()
-        let bucket = makeBucket(service)
-        try await bucket.load()
-        let composition = Composition {
-            Input { [Post(authorID: 1)] }.resolving(\.authorID, from: bucket)
-        } transform: { _, entries in entries }
-        await composition.load()
-        await service.failFetch(true)
-        await composition.load(using: .remote)
-        if case .result(.failure) = composition.latest {} else { Issue.record("Expected relationship failure") }
-        #expect(bucket.error == nil)
-        await service.failFetch(false)
-        await composition.load(using: .remote)
-        #expect(value(composition.latest)?[1] == Entry(1, "new"))
-    }
 }
 
 private nonisolated struct Entry: Identifiable, Sendable, Equatable {
@@ -367,7 +278,6 @@ private nonisolated struct Entry: Identifiable, Sendable, Equatable {
     let name: String
     init(_ id: Int, _ name: String) { self.id = id; self.name = name }
 }
-private nonisolated struct Post: Sendable { let authorID: Int }
 private enum Failure: Error { case failed }
 private actor Service {
     var calls: [Int] = []
@@ -390,9 +300,8 @@ private func makeBucket(_ service: Service) -> IndexedBucket<Int, Entry> {
     Bucket(IndexedKey<Int, Entry>("entries")) {
         LocalSource { Optional<[Entry]>.none } persist: { try await service.persist($0) }
         RemoteSource {
-            Load { [Entry(2, "old"), Entry(1, "old")] }
-            LoadEntry { try await service.fetch($0) }
-        }
+            [Entry(2, "old"), Entry(1, "old")]
+        } loadEntry: { try await service.fetch($0) }
     }
 }
 @Observable private final class Gate {
@@ -409,9 +318,8 @@ private func makeBucket(_ service: Service) -> IndexedBucket<Int, Entry> {
 private func gatedBucket(_ gate: Gate) -> IndexedBucket<Int, Entry> {
     Bucket(IndexedKey<Int, Entry>("gated")) {
         RemoteSource {
-            Load { [Entry(1, "old"), Entry(2, "old")] }
-            LoadEntry { try await gate.fetch($0) }
-        }
+            [Entry(1, "old"), Entry(2, "old")]
+        } loadEntry: { try await gate.fetch($0) }
     }
 }
 private func until(_ condition: @escaping @MainActor () -> Bool) async {

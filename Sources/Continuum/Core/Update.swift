@@ -21,175 +21,139 @@
 //
 
 import Observation
+import os
 
-/// A coherent result or unavailable state published by a bucket or composition.
+/// The result or unavailability reported by an observable source.
 nonisolated public enum Update<Snapshot: Sendable>: Sendable {
-    /// The bucket established a snapshot or reported an error.
+    /// An available snapshot or a failure that prevents a result.
     case result(Result<Snapshot, any Error>)
 
-    /// The observed state is unavailable.
+    /// The source has yet to produce a result or has cleared it.
     case reset
 }
 
-/// The observable-source contract implemented by Continuum types.
+extension Update {
+    var snapshot: Snapshot? {
+        guard case .result(.success(let value)) = self else { return nil }
+        return .some(value)
+    }
+}
+
+/// The public observation and loading contract for inputs to a composition.
 ///
-/// Continuum provides conformances for ``Bucket``, ``BucketPartition``, and
-/// ``Composition``. External asynchronous sources should use
-/// ``Input/init(updates:subscriptionOnLoad:load:)`` rather than adding a
-/// conformance.
+/// Buckets and compositions conform to this protocol. Apps and libraries can
+/// pass their own observable sources to ``Input``. Each source owns its loading,
+/// reset, and subscription lifecycle.
 @MainActor
 public protocol UpdateSource<Snapshot>: AnyObject, Observable {
+    /// The value published when the source succeeds.
     associatedtype Snapshot: Sendable
 
-    /// The source's current observable outcome.
+    /// The current snapshot, failure, or unavailability.
     var latest: Update<Snapshot> { get }
+    /// An observable operation error that can coexist with an available snapshot.
+    ///
+    /// The default is `nil`. Publish a failure that prevents an available
+    /// snapshot through ``latest``.
+    var error: (any Error)? { get }
+
+    /// Loads or refreshes the source using the requested policy.
+    ///
+    /// The default for external sources is a no-op. Implement this method to
+    /// participate in composition loads. Publish failures through ``latest``
+    /// or ``error``.
+    func load(using policy: LoadPolicy) async
 }
 
-/// Observes buckets and transforms their successful snapshots.
-///
-/// The tuple can freely mix unpartitioned buckets and selected partitions. The
-/// sequence remains silent until every source has a successful snapshot, unless
-/// a source reports an error. After emitting a result, it emits one reset when a
-/// source becomes unavailable. Initial and repeated unavailable states remain
-/// silent.
-///
-/// Errors take precedence over unavailable sources. By default, the first
-/// failure in tuple order is emitted. Use `mapFailures` to combine every current
-/// dependency failure into one error. The transform runs only when every source
-/// has a successful snapshot, and a thrown transform error is emitted directly.
-/// Each observation retains its sources until termination. Emitted updates
-/// have unbounded buffering; slow consumers can retain older snapshots. Changes
-/// before observation resumes may coalesce, so this is not a mutation log.
-/// Cancel iteration when the observation is no longer needed.
-///
-/// Creating the sequence is main actor-isolated because it begins observing
-/// bucket state. The returned updates can be consumed from any isolation domain.
-///
-/// - Parameters:
-///   - sources: The buckets and selected partitions the transform requires.
-///   - mapFailures: The error produced from every currently failing dependency,
-///     in tuple order.
-///   - transform: The value produced from the successful snapshots.
-/// - Returns: An independent update stream that ends when iteration is
-///   cancelled.
-@available(*, deprecated, message: "Use Composition { Input(source) } transform: { ... } instead.")
-@MainActor
-public func bucketUpdates<
-    each Source: UpdateSource,
-    Output: Sendable
->(
-    observing sources: (repeat each Source),
-    mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
-    transform: @escaping @MainActor
-        (repeat (each Source).Snapshot) throws -> Output
-) -> AsyncStream<Update<Output>> {
-    makeBucketUpdates { id, changes in
-        let updates = withObservationTracking {
-            (repeat (each sources).latest)
-        } onChange: {
-            changes.yield(id)
-        }
-        var failures: [any Error] = []
-        var hasReset = false
+public extension UpdateSource {
+    var error: (any Error)? { nil }
 
-        for update in repeat each updates {
-            switch update {
-            case .result(.failure(let error)):
-                failures.append(error)
-            case .reset:
-                hasReset = true
-            case .result(.success):
-                break
-            }
-        }
-
-        if failures.isEmpty == false {
-            return .result(.failure(mapFailures(failures)))
-        }
-        if hasReset {
-            return .reset
-        }
-
-        do {
-            return .result(
-                .success(
-                    try transform(
-                        repeat successfulSnapshot(from: each updates)
-                    )
-                )
-            )
-        } catch {
-            return .result(.failure(error))
+    func load(using policy: LoadPolicy) async {
+        if let source = self as? any LoadableSource {
+            await SourceLoadContext.load(source, using: policy)
         }
     }
 }
 
-/// Observes one bucket or selected partition and transforms its successful
-/// snapshot.
-///
-/// Delivery and failure behavior matches the tuple overload.
-/// Each observation retains its sources until termination. Emitted updates
-/// have unbounded buffering; slow consumers can retain older snapshots. Changes
-/// before observation resumes may coalesce, so this is not a mutation log.
-/// Cancel iteration when the observation is no longer needed.
-///
-/// Creating the sequence is main actor-isolated because it begins observing
-/// bucket state. The returned updates can be consumed from any isolation domain.
-///
-/// - Parameters:
-///   - source: The bucket or selected partition the transform requires.
-///   - mapFailures: The error produced from the source failure.
-///   - transform: The value produced from the successful snapshot.
-/// - Returns: An independent update stream that ends when iteration is
-///   cancelled.
-@available(*, deprecated, message: "Use Composition { Input(source) } transform: { ... } instead.")
+// Keeps invalidation visible when Observation coalesces a reset and its replacement.
 @MainActor
-public func bucketUpdates<
-    Source: UpdateSource,
-    Output: Sendable
->(
-    observing source: Source,
-    mapFailures: @escaping @MainActor ([any Error]) -> any Error = { $0[0] },
-    transform: @escaping @MainActor (Source.Snapshot) throws -> Output
-) -> AsyncStream<Update<Output>> {
-    makeBucketUpdates { id, changes in
-        let update = withObservationTracking {
-            source.latest
-        } onChange: {
-            changes.yield(id)
-        }
+protocol CompositionResetSource: AnyObject {
+    var resetRevision: UInt { get }
+}
 
-        switch update {
-        case .result(.success(let snapshot)):
-            do {
-                return .result(.success(try transform(snapshot)))
-            } catch {
-                return .result(.failure(error))
-            }
-        case .result(.failure(let error)):
-            return .result(.failure(mapFailures([error])))
-        case .reset:
-            return .reset
+/// A participant in a composition load.
+@MainActor
+protocol LoadableSource: AnyObject, Sendable {
+    var loadIdentity: ObjectIdentifier { get }
+    func load(in context: SourceLoadContext) async
+}
+
+extension LoadableSource {
+    var loadIdentity: ObjectIdentifier { ObjectIdentifier(self) }
+}
+
+/// Shares dependent loads for the duration of a single top-level load.
+final class SourceLoadContext: Sendable {
+    private struct State: Sendable {
+        var isCancelled = false
+        var loads: [ObjectIdentifier: Task<Void, Never>] = [:]
+    }
+
+    let policy: LoadPolicy
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    private init(policy: LoadPolicy) { self.policy = policy }
+
+    @MainActor
+    static func load(_ source: any LoadableSource, using policy: LoadPolicy) async {
+        let context = Self(policy: policy)
+        await withTaskCancellationHandler {
+            await source.load(in: context)
+        } onCancel: {
+            context.cancel()
         }
+    }
+
+    @MainActor
+    func loadAll(_ sources: [any LoadableSource]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for source in sources {
+                group.addTask { await self.load(source) }
+            }
+        }
+    }
+
+    @MainActor
+    func load(_ source: any LoadableSource) async {
+        guard !Task.isCancelled else { return }
+        let id = source.loadIdentity
+        let task = state.withLock { state -> Task<Void, Never>? in
+            guard !state.isCancelled else { return nil }
+            if let task = state.loads[id] { return task }
+            let task = Task { @MainActor in
+                guard !Task.isCancelled else { return }
+                await source.load(in: self)
+            }
+            state.loads[id] = task
+            return task
+        }
+        await task?.value
+    }
+
+    private func cancel() {
+        // The top-level call owns shared work, even if an individual branch stops waiting.
+        let tasks = state.withLock { state in
+            state.isCancelled = true
+            return state.loads.values
+        }
+        for task in tasks { task.cancel() }
     }
 }
 
-private func makeBucketUpdates<Output: Sendable>(
-    evaluate: @escaping @MainActor (
-        _ id: UInt,
-        _ changes: AsyncStream<UInt>.Continuation
-    ) -> Update<Output>
-) -> AsyncStream<Update<Output>> {
-    makeBucketObservation(evaluate: evaluate).stream
-}
-
-func makeBucketObservation<Output: Sendable>(
-    evaluate: @escaping @MainActor (
-        _ id: UInt,
-        _ changes: AsyncStream<UInt>.Continuation
-    ) -> Update<Output>
-) -> (stream: AsyncStream<Update<Output>>, cancel: @Sendable () -> Void) {
-    let (stream, continuation) = AsyncStream<Update<Output>>.makeStream(
+func makeSourceObservation<Source: UpdateSource & Sendable>(
+    _ source: Source
+) -> (stream: AsyncStream<Update<Source.Snapshot>>, cancel: @Sendable () -> Void) {
+    let (stream, continuation) = AsyncStream<Update<Source.Snapshot>>.makeStream(
         bufferingPolicy: .unbounded
     )
     let producer = Task { @MainActor in
@@ -200,6 +164,14 @@ func makeBucketObservation<Output: Sendable>(
         var observationID: UInt = 0
         var emittedResult = false
 
+        @MainActor func read(_ id: UInt) -> Update<Source.Snapshot> {
+            withObservationTracking {
+                source.latest
+            } onChange: {
+                changeContinuation.yield(id)
+            }
+        }
+
         defer {
             changeContinuation.finish()
             continuation.finish()
@@ -208,13 +180,13 @@ func makeBucketObservation<Output: Sendable>(
         while Task.isCancelled == false {
             observationID &+= 1
             var observedID = observationID
-            var update = evaluate(observedID, changeContinuation)
+            var update = read(observedID)
 
             if case .reset = update, emittedResult {
                 await Task.yield()
                 observationID &+= 1
                 observedID = observationID
-                update = evaluate(observedID, changeContinuation)
+                update = read(observedID)
             }
 
             switch update {
@@ -250,42 +222,3 @@ func makeBucketObservation<Output: Sendable>(
         producer.cancel()
     })
 }
-
-extension Bucket: UpdateSource where Scope == UnpartitionedBucketScope {}
-
-extension BucketPartition: UpdateSource, CompositionResetSource {}
-
-nonisolated private func successfulSnapshot<Snapshot: Sendable>(
-    from update: Update<Snapshot>
-) -> Snapshot {
-    guard case .result(.success(let snapshot)) = update else {
-        preconditionFailure("Bucket updates must be successful before unwrapping")
-    }
-    return snapshot
-}
-
-
-func makeSourceObservation<Source: UpdateSource & Sendable>(
-    _ source: Source
-) -> (stream: AsyncStream<Update<Source.Snapshot>>, cancel: @Sendable () -> Void) {
-    makeBucketObservation { id, changes in
-        withObservationTracking {
-            source.latest
-        } onChange: {
-            changes.yield(id)
-        }
-    }
-}
-
-
-/// The former name for ``Update``.
-///
-/// This alias preserves source compatibility with the original API.
-@available(*, deprecated, renamed: "Update")
-public typealias BucketUpdate<Value: Sendable> = Update<Value>
-
-/// The former name for ``UpdateSource``.
-///
-/// This alias preserves source compatibility with the original API.
-@available(*, deprecated, renamed: "UpdateSource")
-public typealias BucketUpdateSource = UpdateSource

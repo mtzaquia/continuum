@@ -1,55 +1,27 @@
-# Invalidate snapshots
+# Invalidate a snapshot
 
-Use `reset()` when a snapshot is no longer valid:
-
-```swift
-try await posts.reset()
-```
-
-Reset supersedes source work and mutations, clears memory and pagination, and
-sends `nil` to writable local sources. This prevents a later cached load from
-restoring stale data. A persistence failure restores the previous state,
-attempts to restore storage, and throws. [Persistence rules →](persistence.md)
+Call `try await bucket.reset()` when a snapshot should be discarded. Reset clears the snapshot, error, freshness, and cursor before suspending, then sends `nil` to writable local sources. It supersedes older reads and edits. A failed write throws, restores previous availability, and attempts to restore persistence. [Operation ordering](operation-ordering.md)
 
 ## Observe application events
 
-An `InvalidationSignal` performs the same reset for every event:
+Add an `InvalidationSignal` to a bucket configuration to reset it on events.
 
 ```swift
+import Continuum
 import Foundation
 
 let posts = Bucket(IndexedKey<Post.ID, Post>("posts")) {
-  LocalSource {
-    try await database.posts()
-  } persist: { snapshot in
-    try await database.replacePosts(with: snapshot)
-  }
   RemoteSource { try await client.posts() }
   InvalidationSignal {
-    NotificationCenter.default.notifications(named: .accountDidChange)
+    NotificationCenter.default.notifications(named: Notification.Name("postsDidChange"))
   }
 }
 ```
 
-The event sequence must be sendable; its element values are ignored. A bucket
-owns its subscriptions for its lifetime. A partition starts its subscriptions
-on first access, so an application-wide signal is observed once per accessed
-partition.
+The async sequence must be sendable. Each element triggers a reset. A failed reset leaves the subscription available for the next event. Sequence completion ends the subscription. If iteration throws, the bucket records `error`, preserves availability, and ends that subscription. Each bucket subscribes for its lifetime, so a partitioned container starts a subscription per accessed partition.
 
-A failed reset leaves the subscription running so a later event can retry.
-Sequence completion ends that subscription; a sequence error becomes the
-bucket's error and ends it.
+For a session change that reuses a bucket, stop submitting old-session work and await `reset()` before exposing the next session. Event delivery is asynchronous.
 
 ## Understand observable resets
 
-A bucket iterator emits reset after a result while the bucket remains
-unavailable. If replacement data is already available when observation resumes,
-it emits that result directly.
-
-Compositions preserve required-input reset history, including through nesting.
-Optional resets contribute nil. A resolved root also discards its relationship
-values; resetting a selected required partition invalidates the pair without
-reloading it. Unrelated inputs keep observing and are not reset or restarted.
-[Composition outcomes →](composition.md#observe-outcomes-and-resets)
-
-Next: [Operation ordering](operation-ordering.md) · [Compositions](composition.md)
+A bucket iterator can coalesce a reset and a replacement into the replacement result. Compositions preserve required Continuum input resets across that coalescing. [Composition outcomes](composition.md#observe-outcomes-and-resets)

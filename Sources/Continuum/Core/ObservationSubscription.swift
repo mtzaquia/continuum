@@ -51,9 +51,4 @@ final class ObservationSubscription {
             }
         }
     }
-
-    func cancel() {
-        change.invalidate()
-        change = Change()
-    }
 }

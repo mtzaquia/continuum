@@ -1,61 +1,26 @@
 # Coordinate overlapping operations
 
-Each unpartitioned bucket or selected partition owns its operation ordering.
-Memory publication happens on the main actor. Local I/O runs asynchronously,
-with a queue that orders complete persistence sequences and local reads across
-suspension points.
+Each bucket, including each selected partition, owns its operation order. Memory publication happens on the main actor, and local I/O is serialized per bucket across suspension points.
 
-## Choose the replacement policy
-
-| Incoming operation | Pending work |
+| Incoming operation | Interaction with earlier work |
 | --- | --- |
-| `store` or `remove` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
-| `reset` | Supersedes queued and running mutations, loads, entry fetches, and pages. Clears memory before awaiting local deletion. |
-| `.cached` with fresh memory | Returns the current snapshot immediately, including optimistic values. Without `staleAfter`, memory stays fresh indefinitely. |
-| `.cached` without fresh memory | Waits for pending mutations/reset, rechecks memory, then shares or starts a load. Configured freshness requires remote validation of stale or unvalidated data. |
-| `.cachedThenRemote` | Waits for pending mutations/reset, then shares or starts a load that reaches remote. |
-| `.remote` | Supersedes queued and running mutations, loads, entry fetches, and pages. |
-| `load(id:using:)` | Cached hits return immediately. Otherwise waits for mutations and initial loading, then shares work per ID unless `.remote` replaces it. Replacements use the mutation queue and cancel pending pages, preserving the cursor for retry. |
-| `loadNext()` | Waits for mutations/reset and initial loading, then coalesces requests for the current cursor. |
-
-Store reconciliation checks that it still owns the state before publishing
-or persisting the server-authoritative result. A page captures its base only
-after pending mutations finish. These rules prevent an older store from
-overwriting a refresh or dropping a newly published page.
-
-A forced remote load retains the current memory snapshot while it runs. If
-that snapshot was optimistic, it remains readable until the refresh resolves;
-superseding a mutation does not confirm or undo its remote side effects.
+| `.cached` with fresh memory | Returns immediately, including optimistic values during a mutation. |
+| `.cached` without fresh memory | Waits for pending mutations and resets, then rechecks memory and shares or starts a load. |
+| `.cachedThenRemote` | Waits for pending mutations and resets, then supersedes active paging and shares or starts a load that reaches remote. A pending cached flight that returns a local hit can continue to remote for its waiting callers. |
+| `.remote` | Waits for pending mutations and resets, then supersedes active reads. |
+| `load(id:using:)` | A cached hit returns immediately. Fetches wait for mutations and initial loading. They share work per ID unless `.remote` replaces it. Reconciliation uses the mutation queue and supersedes active pages while preserving the cursor. |
+| `loadNext()` | Waits for mutations, resets, and initial loading before capturing the snapshot to merge. Concurrent calls for the same cursor share work. |
+| `mutate(_:)` | Waits for prior mutations, then supersedes active loads, entry fetches, and pages. |
+| `reset()` | Clears memory and revokes ownership before suspending. Cancels reads and queued mutations. An endpoint already running can return to its caller, while any late edit loses ownership of the snapshot. |
 
 ## Finish persistence in order
 
-Cancellation is cooperative. A writable source that is already executing may
-still commit after cancellation. Continuum waits for it to return before
-starting the next local operation. A successful reset therefore finishes after
-older writes and cannot be undone by one of those writes finishing late.
+A writable source can finish a write after cancellation. The bucket waits for it to return before the next local operation, so an old write finishes before reset clears storage. Source closures and mutation handlers must return or throw for queued work to advance. Awaiting another queued operation on the same bucket from one of those closures can deadlock. [Persistence](persistence.md#use-several-writable-destinations)
 
-Local source closures must eventually return or throw for queued work to
-advance. Do not await another operation on the same bucket from inside one of
-its source closures. Different partitions have separate queues; shared backing
-stores must coordinate access from multiple partitions or direct callers.
+## Understand cancellation
 
-Persistence ordering is not a transaction across destinations. See
-[Persistence failures](persistence.md#use-several-writable-destinations).
+A caller cancelling its wait leaves a shared snapshot or page flight running. Reset, mutation, or forced remote loading supersedes reads as described above. After reset, callers awaiting the earlier load receive `CancellationError`.
 
-## Cancel a mutation
+Cancelling a mutation or reset restores the previous state and attempts to restore storage while the operation still owns that state. Cleanup can finish after cancellation, and cancellation is thrown without becoming the bucket's `error`. An endpoint already in progress can still produce a server side effect.
 
-When the caller cancels store, remove, or reset, the operation restores its
-previous memory snapshot and attempts to restore persistence if it still owns
-the state. Restoration can run despite caller cancellation. The call throws
-`CancellationError` after cleanup, without recording cancellation as `error`.
-
-If reset or a forced remote load has superseded the operation, its rollback is
-skipped so it cannot overwrite the replacement. Cancellation cannot guarantee
-that a remote server rejected a request it already received.
-
-Load flights are shared work: cancellation of one awaiting load caller does not
-cancel the underlying source flight. Reset, mutation, or forced remote loading
-supersedes source work according to the table above.
-
-Next: [Loading snapshots](loading.md) · [Remote mutations](remote-mutations.md) ·
-[Resource lifetime](resource-lifetime.md)
+[Loading snapshots](loading.md) · [Remote mutations](remote-mutations.md)
